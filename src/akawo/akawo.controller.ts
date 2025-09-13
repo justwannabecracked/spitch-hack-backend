@@ -9,8 +9,8 @@ import {
   Get,
   ParseFilePipe,
   MaxFileSizeValidator,
-  FileTypeValidator,
   Logger,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -30,7 +30,6 @@ export class AkawoController {
       new ParseFilePipe({
         validators: [
           new MaxFileSizeValidator({ maxSize: 1000000 }), // 1 MB limit
-          new FileTypeValidator({ fileType: 'audio' }),
         ],
       }),
     )
@@ -39,8 +38,14 @@ export class AkawoController {
     @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en' },
   ) {
     this.logger.log(
-      `Received audio file: ${file.originalname}, size: ${file.size} bytes`,
+      `Received file: ${file.originalname}, size: ${file.size}, type: ${file.mimetype}`,
     );
+
+    if (!file.mimetype.startsWith('audio/')) {
+      throw new BadRequestException(
+        'Validation failed: Uploaded file is not an audio file.',
+      );
+    }
 
     const userId = req.user.sub;
     return this.akawoService.processAudioCommand(
