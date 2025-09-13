@@ -1,10 +1,19 @@
 /* eslint-disable no-case-declarations */
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  Logger,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
+import { createReadStream } from 'fs';
 
 type ParsedTransaction = {
   customer: string;
@@ -17,6 +26,7 @@ type Intent = 'log_transaction' | 'query_debtors' | 'unknown';
 @Injectable()
 export class AkawoService {
   private spitch: Spitch;
+  private readonly logger = new Logger(AkawoService.name);
 
   constructor(
     private configService: ConfigService,
@@ -36,11 +46,48 @@ export class AkawoService {
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en' = 'en',
   ) {
-    const transcriptionResponse = await this.spitch.speech.transcribe({
-      content: audioBuffer as any,
-      language,
-    });
+    this.logger.log(
+      `Processing audio command for user ${userId} in language: ${language}`,
+    );
+
+    const tempFilePath = path.join(
+      os.tmpdir(),
+      `temp-audio-${Date.now()}.webm`,
+    );
+    let transcriptionResponse;
+
+    try {
+      await fs.writeFile(tempFilePath, audioBuffer);
+      this.logger.log(`Audio buffer saved to temporary file: ${tempFilePath}`);
+
+      const fileStream = createReadStream(tempFilePath);
+
+      transcriptionResponse = await this.spitch.speech.transcribe({
+        content: fileStream as any,
+        language,
+      });
+    } catch (error) {
+      this.logger.error(
+        'Error during file handling or Spitch transcription',
+        error,
+      );
+      throw new InternalServerErrorException(
+        'Failed to process audio with Spitch.',
+      );
+    } finally {
+      try {
+        await fs.unlink(tempFilePath);
+        this.logger.log(`Temporary file deleted: ${tempFilePath}`);
+      } catch (cleanupError) {
+        this.logger.error(
+          `Failed to delete temporary file: ${tempFilePath}`,
+          cleanupError,
+        );
+      }
+    }
+
     const transcribedText = transcriptionResponse.text;
+    this.logger.log(`Transcribed Text: "${transcribedText}"`);
 
     if (!transcribedText) {
       throw new BadRequestException(
@@ -49,6 +96,7 @@ export class AkawoService {
     }
 
     const intent = this.determineIntent(transcribedText);
+    this.logger.log(`Determined Intent: "${intent}"`);
 
     switch (intent) {
       case 'log_transaction':
