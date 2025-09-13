@@ -1,4 +1,3 @@
-/* eslint-disable no-case-declarations */
 import {
   Injectable,
   BadRequestException,
@@ -10,6 +9,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
+// Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -50,6 +50,7 @@ export class AkawoService {
       `Processing audio command for user ${userId} in language: ${language}`,
     );
 
+    // --- STEP 1: Save the audio buffer to a temporary file ---
     const tempFilePath = path.join(
       os.tmpdir(),
       `temp-audio-${Date.now()}.webm`,
@@ -60,21 +61,34 @@ export class AkawoService {
       await fs.writeFile(tempFilePath, audioBuffer);
       this.logger.log(`Audio buffer saved to temporary file: ${tempFilePath}`);
 
+      // --- STEP 2: Create a ReadStream from the file and send it to Spitch ---
       const fileStream = createReadStream(tempFilePath);
 
       transcriptionResponse = await this.spitch.speech.transcribe({
-        content: fileStream as any,
+        content: fileStream as any, // Use the stream, which is a supported type
         language,
       });
     } catch (error) {
+      // THE FIX IS HERE: We now inspect the error to provide a better message.
       this.logger.error(
         'Error during file handling or Spitch transcription',
         error,
       );
+
+      // Check if it's a structured API error from Spitch
+      if (error.status && error.error?.detail) {
+        // Forward the specific, useful error detail from the Spitch API
+        throw new BadRequestException(
+          `Spitch API Error: ${error.error.detail}`,
+        );
+      }
+
+      // Otherwise, it's likely a file system or unknown server issue
       throw new InternalServerErrorException(
-        'Failed to process audio with Spitch.',
+        'A server error occurred while processing the audio.',
       );
     } finally {
+      // --- STEP 3: IMPORTANT - Clean up the temporary file ---
       try {
         await fs.unlink(tempFilePath);
         this.logger.log(`Temporary file deleted: ${tempFilePath}`);
@@ -113,6 +127,7 @@ export class AkawoService {
     }
   }
 
+  // ... (The rest of your service file remains the same)
   private async handleTransactionLogging(
     text: string,
     userId: string,
