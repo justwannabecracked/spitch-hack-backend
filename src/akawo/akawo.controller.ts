@@ -30,7 +30,7 @@ export class AkawoController {
       new ParseFilePipe({
         validators: [
           new MaxFileSizeValidator({ maxSize: 1000000 }), // 1 MB limit
-          new FileTypeValidator({ fileType: /(audio\/)/ }),
+          new FileTypeValidator({ fileType: 'audio' }),
         ],
       }),
     )
