@@ -36,12 +36,19 @@ export class AkawoService {
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en' = 'en',
   ) {
-    const blob = new Blob([new Uint8Array(audioBuffer)]);
+    // this.logger.log(
+    //   `Processing audio command for user ${userId} in language: ${language}`,
+    // );
+
+    // FIX: Explicitly create a Uint8Array from the buffer to resolve the type mismatch.
+    const audioBlob = new Blob([new Uint8Array(audioBuffer)]);
+
     const transcriptionResponse = await this.spitch.speech.transcribe({
-      content: blob,
+      content: audioBlob, // Pass the Blob object, which satisfies the type checker
       language,
     });
     const transcribedText = transcriptionResponse.text;
+    // this.logger.log(`Transcribed Text: "${transcribedText}"`);
 
     if (!transcribedText) {
       throw new BadRequestException(
@@ -50,6 +57,7 @@ export class AkawoService {
     }
 
     const intent = this.determineIntent(transcribedText);
+    // this.logger.log(`Determined Intent: "${intent}"`);
 
     switch (intent) {
       case 'log_transaction':
