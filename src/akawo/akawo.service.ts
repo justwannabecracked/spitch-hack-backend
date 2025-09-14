@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations */
 import {
   Injectable,
   BadRequestException,
@@ -13,7 +14,6 @@ import Spitch from 'spitch';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { createReadStream } from 'fs';
 
 type ParsedTransaction = {
   customer: string;
@@ -50,7 +50,6 @@ export class AkawoService {
       `Processing audio command for user ${userId} in language: ${language}`,
     );
 
-    // --- STEP 1: Save the audio buffer to a temporary file ---
     const tempFilePath = path.join(
       os.tmpdir(),
       `temp-audio-${Date.now()}.webm`,
@@ -58,37 +57,34 @@ export class AkawoService {
     let transcriptionResponse;
 
     try {
+      // Step 1: Write the incoming buffer to a temporary file.
       await fs.writeFile(tempFilePath, audioBuffer);
       this.logger.log(`Audio buffer saved to temporary file: ${tempFilePath}`);
 
-      // --- STEP 2: Create a ReadStream from the file and send it to Spitch ---
-      const fileStream = createReadStream(tempFilePath);
+      // Step 2 (THE FIX): Read the file back into a new buffer.
+      // This ensures we send a complete, non-streamed file buffer, which can be more reliable.
+      const fileBuffer = await fs.readFile(tempFilePath);
 
+      // Step 3: Send the new file buffer to Spitch for transcription.
       transcriptionResponse = await this.spitch.speech.transcribe({
-        content: fileStream as any, // Use the stream, which is a supported type
+        content: fileBuffer as any,
         language,
       });
     } catch (error) {
-      // THE FIX IS HERE: We now inspect the error to provide a better message.
       this.logger.error(
         'Error during file handling or Spitch transcription',
         error,
       );
-
-      // Check if it's a structured API error from Spitch
       if (error.status && error.error?.detail) {
-        // Forward the specific, useful error detail from the Spitch API
         throw new BadRequestException(
           `Spitch API Error: ${error.error.detail}`,
         );
       }
-
-      // Otherwise, it's likely a file system or unknown server issue
       throw new InternalServerErrorException(
         'A server error occurred while processing the audio.',
       );
     } finally {
-      // --- STEP 3: IMPORTANT - Clean up the temporary file ---
+      // Step 4: Clean up the temporary file.
       try {
         await fs.unlink(tempFilePath);
         this.logger.log(`Temporary file deleted: ${tempFilePath}`);
