@@ -10,16 +10,15 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-// Node.js built-in modules for handling files and paths
+// Àwọn ohun èlò tí a ti pèsè sílẹ̀ nínu Node.js fún ṣíṣe àkóso faili
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createReadStream } from 'fs';
 import ffmpeg = require('fluent-ffmpeg');
-// FIX: Import the File class from Node's buffer module
 import { File } from 'node:buffer';
 
-// Polyfill for the global File object, required by the Spitch SDK in Node.js < 20
+// Èyí jẹ́ fún àtúnṣe kí ètò le ṣiṣẹ́ dáradára lórí Node.js < 20
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = File as any;
 }
@@ -43,9 +42,7 @@ export class AkawoService {
   ) {
     const apiKey = this.configService.get<string>('SPITCH_API_KEY');
     if (!apiKey) {
-      throw new Error(
-        'SPITCH_API_KEY is not defined in environment variables.',
-      );
+      throw new Error('A kò rí SPITCH_API_KEY nínú àwọn ayípadà àyíká.');
     }
     this.spitch = new Spitch({ apiKey });
   }
@@ -56,19 +53,21 @@ export class AkawoService {
     language: 'ig' | 'yo' | 'ha' | 'en' = 'en',
   ) {
     this.logger.log(
-      `Processing audio command for user ${userId} in language: ${language}`,
+      `Ṣíṣe àkóso ohùn àṣẹ fún olùṣe ${userId} ní èdè: ${language}`,
     );
 
     let transcriptionResponse;
     const tempWavPath = path.join(os.tmpdir(), `final-audio-${Date.now()}.wav`);
 
     try {
-      this.logger.log('Starting audio conversion from webm to wav...');
+      this.logger.log('Bẹ̀rẹ̀ sí yí ohùn padà láti webm sí wav...');
       const wavBuffer = await this.convertWebmToWav(audioBuffer);
-      this.logger.log('Audio conversion successful.');
+      this.logger.log('Àṣeyọrí nínú yíyí ohùn padà.');
 
       await fs.writeFile(tempWavPath, wavBuffer);
-      this.logger.log(`WAV buffer saved to temporary file: ${tempWavPath}`);
+      this.logger.log(
+        `A ti fi ohùn wav pamọ́ sí faili ìgbà díẹ̀: ${tempWavPath}`,
+      );
 
       const fileStream = createReadStream(tempWavPath);
 
@@ -78,40 +77,38 @@ export class AkawoService {
       });
     } catch (error) {
       this.logger.error(
-        'Error during audio conversion or Spitch transcription',
+        'Àṣìṣe wáyé nígbà tí a ń yí ohùn padà tàbí tí a ń fi ránṣẹ́ sí Spitch',
         error.stack,
       );
       if (error.status && error.error?.detail) {
         throw new BadRequestException(
-          `Spitch API Error: ${error.error.detail}`,
+          `Àṣìṣe láti ọ̀dọ̀ Spitch API: ${error.error.detail}`,
         );
       }
       throw new InternalServerErrorException(
-        'A server error occurred while processing the audio.',
+        'Àṣìṣe wáyé lórí ẹ̀rọ ìsàkóso nígbà tí a ń ṣiṣẹ́ lórí ohùn.',
       );
     } finally {
       try {
         await fs.unlink(tempWavPath);
-        this.logger.log(`Temporary WAV file deleted: ${tempWavPath}`);
+        this.logger.log(`A ti pa faili ìgbà díẹ̀ rẹ́: ${tempWavPath}`);
       } catch (cleanupError) {
         this.logger.error(
-          `Failed to delete temporary WAV file: ${tempWavPath}`,
+          `Àṣìṣe nígbà tí a ń pa faili ìgbà díẹ̀ rẹ́: ${tempWavPath}`,
           cleanupError,
         );
       }
     }
 
     const transcribedText = transcriptionResponse.text;
-    this.logger.log(`Transcribed Text: "${transcribedText}"`);
+    this.logger.log(`Ọ̀rọ̀ tí a túmọ̀: "${transcribedText}"`);
 
     if (!transcribedText) {
-      throw new BadRequestException(
-        'I could not hear anything. Please speak clearly.',
-      );
+      throw new BadRequestException('N kò gbọ́ ohunkóhun. Jọ̀wọ́ sọ̀rọ̀ kedere.');
     }
 
     const intent = this.determineIntent(transcribedText);
-    this.logger.log(`Determined Intent: "${intent}"`);
+    this.logger.log(`Èrò ọkàn tí a pinnu: "${intent}"`);
 
     switch (intent) {
       case 'log_transaction':
@@ -138,13 +135,13 @@ export class AkawoService {
           ffmpeg(tempInputPath)
             .toFormat('wav')
             .on('error', (err) => {
-              this.logger.error('FFmpeg error:', err.message);
+              this.logger.error('Àṣìṣe FFmpeg:', err.message);
               fs.unlink(tempInputPath).catch((e) =>
-                this.logger.error('Failed to clean up input file', e),
+                this.logger.error('Àṣìṣe nígbà tí a ń pa faili ìbẹ̀rẹ̀ rẹ́', e),
               );
               reject(
                 new InternalServerErrorException(
-                  'Failed to convert audio file.',
+                  'Àṣìṣe nígbà yíyí faili ohùn padà.',
                 ),
               );
             })
@@ -252,7 +249,7 @@ export class AkawoService {
   }
 
   private parseTransactionText(text: string): ParsedTransaction | null {
-    this.logger.debug(`Parsing text: "${text}"`);
+    this.logger.debug(`Ṣíṣe ìtúpalẹ̀ ọ̀rọ̀: "${text}"`);
 
     const debtPattern = /kú\s(?<amount>[\w\s\d]+)/i;
     const incomePattern = /san\s(?<amount>[\w\s\d]+)/i;
@@ -277,15 +274,15 @@ export class AkawoService {
 
     if (!type || amount === 0) {
       this.logger.warn(
-        'Parsing failed to find a valid amount and transaction type.',
+        'Ìtúpalẹ̀ kùnà láti rí iye owó tó péye àti irúfẹ́ ìd transacción.',
       );
       return null;
     }
 
     const customer =
       customerMatch?.groups?.customer.trim().replace(/,/g, '') ||
-      'Unknown Customer';
-    const details = detailsMatch?.groups?.details.trim() || 'Transaction';
+      'Oníbàárà Àìmọ̀';
+    const details = detailsMatch?.groups?.details.trim() || 'Ìd transacción';
 
     return {
       customer: this.capitalize(customer),
@@ -394,24 +391,41 @@ export class AkawoService {
     text: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ): Promise<string | null> {
-    try {
-      const voice = this.getVoiceForLanguage(language);
-      // FIX: Sanitize the text before sending it to the TTS API
-      const sanitizedText = this.normalizeTextForTTS(text);
+    const voice = this.getVoiceForLanguage(language);
 
+    // **ÀTÚNṢE PÀTÀKÌ:** Àkọ́kọ́ gbìyànjú pẹ̀lú ọ̀rọ̀ tó péye
+    try {
+      this.logger.debug(`Ìgbìyànjú TTS 1 (Ọ̀rọ̀ Gangan): "${text}"`);
       const ttsResponse = await this.spitch.speech.generate({
-        text: sanitizedText,
+        text,
         language,
         voice,
       });
       return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
     } catch (error) {
-      this.logger.error(
-        `Spitch TTS API failed for text: "${text}"`,
-        error.stack,
+      this.logger.warn(
+        `Spitch TTS API kùnà fún ọ̀rọ̀ gangan. Àṣìṣe: ${error.message}. À ń gbìyànjú pẹ̀lú ọ̀rọ̀ tí a ti ṣe àtúnṣe.`,
       );
-      // Return null instead of throwing an error to make the app more resilient
-      return null;
+
+      // **ÌGBÌYÀNJÚ KEJÌ:** Yọ àwọn àmì ohùn kúrò kí o tún gbìyànjú lẹ́ẹ̀kansíi
+      try {
+        const sanitizedText = this.normalizeTextForTTS(text);
+        this.logger.debug(
+          `Ìgbìyànjú TTS 2 (Ọ̀rọ̀ Tí A Tí Ṣe Àtúnṣe): "${sanitizedText}"`,
+        );
+        const ttsResponse = await this.spitch.speech.generate({
+          text: sanitizedText,
+          language,
+          voice,
+        });
+        return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
+      } catch (retryError) {
+        this.logger.error(
+          `Spitch TTS API tún kùnà fún ọ̀rọ̀ tí a ti ṣe àtúnṣe: "${text}"`,
+          retryError.stack,
+        );
+        return null; // Padà `null` tí àwọn ìgbìyànjú méjèèjì bá kùnà
+      }
     }
   }
 
