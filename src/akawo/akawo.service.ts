@@ -178,7 +178,6 @@ export class AkawoService {
       });
     }
 
-    // FIX 1: Explicitly type the array to avoid the 'never[]' inference.
     const savedTransactions: (Transaction & { _id: any })[] = [];
     for (const txData of parsedTransactions) {
       const newTransaction = new this.transactionModel({
@@ -257,28 +256,39 @@ export class AkawoService {
   }
 
   /**
-   * V2 of the parser: More dynamic and handles multiple transactions.
+   * V2 - More intelligent parser
    */
   private parseTransactionTextV2(text: string): ParsedTransaction[] {
     this.logger.debug(`V2 Parsing text: "${text}"`);
     const transactions: ParsedTransaction[] = [];
 
-    const customerMatch = text.match(/fún\s(?<customer>[\w\s]+?)(?:,|$)/i);
-    const customer =
-      customerMatch?.groups?.customer.trim().replace(/,/g, '') || 'Oníbàárà';
+    // Normalize text to make regex matching easier (removes accents)
+    const normalizedText = this.normalizeTextForParsing(text);
 
-    const detailsMatch = text.match(/(?:ta|sold)\s(?<details>.*?)\s?fún/i);
-    const details = detailsMatch?.groups?.details.trim() || 'Ọjà';
+    const customerMatch = normalizedText.match(
+      /fun\s(?<customer>[\w\s]+?)(?:,|$)/i,
+    );
+    const customer = customerMatch?.groups?.customer.trim() || 'Onibara'; // 'Customer' in Yoruba
+    this.logger.debug(`Found Customer: "${customer}"`);
 
-    const incomeMatch = text.match(/san\s(?<amount>[\w\s\d]+)/i);
-    const debtMatch = text.match(/kú\s(?<amount>[\w\s\d]+)/i);
+    const detailsMatch = normalizedText.match(
+      /(?:ta|sold)\s(?<details>.*?)\s?fun/i,
+    );
+    const details = detailsMatch?.groups?.details.trim() || 'Oja'; // 'Goods' in Yoruba
+    this.logger.debug(`Found Details: "${details}"`);
+
+    const incomeMatch = normalizedText.match(/san\s(?<amount>[\w\s\d]+)/i);
+    const debtMatch = normalizedText.match(/ku\s(?<amount>[\w\s\d]+)/i);
 
     if (incomeMatch?.groups?.amount) {
       const amount = this.convertTextToNumber(incomeMatch.groups.amount.trim());
+      this.logger.debug(
+        `Found Income Amount (text): "${incomeMatch.groups.amount}", (parsed): ${amount}`,
+      );
       if (amount > 0) {
         transactions.push({
           customer: this.capitalize(customer),
-          details: `Ìsanwó fún ${this.capitalize(details)}`,
+          details: `Isanwo fun ${this.capitalize(details)}`,
           amount,
           type: 'income',
         });
@@ -287,10 +297,13 @@ export class AkawoService {
 
     if (debtMatch?.groups?.amount) {
       const amount = this.convertTextToNumber(debtMatch.groups.amount.trim());
+      this.logger.debug(
+        `Found Debt Amount (text): "${debtMatch.groups.amount}", (parsed): ${amount}`,
+      );
       if (amount > 0) {
         transactions.push({
           customer: this.capitalize(customer),
-          details: `Gbèsè fún ${this.capitalize(details)}`,
+          details: `Gbese fun ${this.capitalize(details)}`,
           amount,
           type: 'debt',
         });
@@ -306,6 +319,13 @@ export class AkawoService {
 
   private capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  private normalizeTextForParsing(text: string): string {
+    return text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
   }
 
   private convertTextToNumber(text: string): number {
@@ -442,16 +462,12 @@ export class AkawoService {
     return messages[lang];
   }
 
-  /**
-   * V2 of the confirmation message generator: Summarizes multiple transactions.
-   */
   private generateConfirmationMessageV2(
     transactions: (Transaction & { _id: any })[],
     lang: string,
   ): string {
     if (transactions.length === 0) return this.generateErrorMessage(lang);
     if (transactions.length === 1) {
-      // FIX 2: Use a type assertion to satisfy the function's expected type.
       return this.generateConfirmationMessage(
         transactions[0] as ParsedTransaction,
         lang,
@@ -470,7 +486,6 @@ export class AkawoService {
     return `O dáa. Mo ti kọ sílẹ̀: ${summary} fún ${customer}.`;
   }
 
-  // Original function kept for single transaction summaries
   private generateConfirmationMessage(
     data: ParsedTransaction,
     lang: string,
@@ -479,7 +494,7 @@ export class AkawoService {
     switch (lang) {
       case 'yo':
         return `O dáa. Mo ti kọ sílẹ̀ pé ${customer} ${
-          type === 'debt' ? 'gbà' : 'san' // Corrected Yoruba verb
+          type === 'debt' ? 'gbà' : 'san'
         } ₦${amount.toLocaleString()} fún ${details}.`;
       case 'ig':
         return `Ọ dị mma. Edeela m na ${customer} ${
