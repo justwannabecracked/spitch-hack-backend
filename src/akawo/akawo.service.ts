@@ -10,7 +10,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-// Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -167,7 +166,7 @@ export class AkawoService {
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ) {
-    const parsedTransactions = this.parseTransactionTextV2(text);
+    const parsedTransactions = this.parseIntelligent(text);
 
     if (parsedTransactions.length === 0) {
       const errorText = this.generateErrorMessage(language);
@@ -231,19 +230,20 @@ export class AkawoService {
   }
 
   private determineIntent(text: string): Intent {
-    const lowerText = text.toLowerCase();
+    const lowerText = this.normalizeTextForParsing(text);
     const queryKeywords = ['tani', 'who', 'list', 'show me', 'awon to je'];
     const transactionKeywords = [
       'gba',
       'ji',
       'owes',
       'san',
-      'kwụrụ',
+      'sanwo',
+      'kwuru',
       'paid',
       'collected',
       'sold',
       'ta',
-      'kú',
+      'ku',
     ];
 
     if (queryKeywords.some((kw) => lowerText.includes(kw))) {
@@ -256,62 +256,67 @@ export class AkawoService {
   }
 
   /**
-   * V2 - More intelligent parser
+   * V3 - Intelligent Parser
    */
-  private parseTransactionTextV2(text: string): ParsedTransaction[] {
-    this.logger.debug(`V2 Parsing text: "${text}"`);
+  private parseIntelligent(text: string): ParsedTransaction[] {
+    this.logger.debug(`V3 Parsing original text: "${text}"`);
     const transactions: ParsedTransaction[] = [];
-
-    // Normalize text to make regex matching easier (removes accents)
     const normalizedText = this.normalizeTextForParsing(text);
+    this.logger.debug(`Normalized text for V3 parsing: "${normalizedText}"`);
 
     const customerMatch = normalizedText.match(
-      /fun\s(?<customer>[\w\s]+?)(?:,|$)/i,
+      /(?:fun|to)\s(?<customer>[\w\s]+?)(?:,|$|\sfun|\sto\s)/i,
     );
-    const customer = customerMatch?.groups?.customer.trim() || 'Onibara'; // 'Customer' in Yoruba
-    this.logger.debug(`Found Customer: "${customer}"`);
+    const customer = customerMatch?.groups?.customer.trim() || 'Onibara';
+    this.logger.debug(`V3 Found Customer: "${customer}"`);
 
     const detailsMatch = normalizedText.match(
-      /(?:ta|sold)\s(?<details>.*?)\s?fun/i,
+      /(?:ta|sold)\s(?<details>.*?)\s?(?:fun|to)/i,
     );
-    const details = detailsMatch?.groups?.details.trim() || 'Oja'; // 'Goods' in Yoruba
-    this.logger.debug(`Found Details: "${details}"`);
+    const details = detailsMatch?.groups?.details.trim() || 'Oja';
+    this.logger.debug(`V3 Found Details: "${details}"`);
 
-    const incomeMatch = normalizedText.match(/san\s(?<amount>[\w\s\d]+)/i);
-    const debtMatch = normalizedText.match(/ku\s(?<amount>[\w\s\d]+)/i);
+    // Flexible patterns for income and debt amounts
+    const incomePattern = /(?:san|sanwo|paid)\s(?<amount>[\w\s\d,-]+)/gi;
+    const debtPattern = /(?:ku|owes|remaining)\s(?<amount>[\w\s\d,-]+)/gi;
 
-    if (incomeMatch?.groups?.amount) {
-      const amount = this.convertTextToNumber(incomeMatch.groups.amount.trim());
-      this.logger.debug(
-        `Found Income Amount (text): "${incomeMatch.groups.amount}", (parsed): ${amount}`,
-      );
-      if (amount > 0) {
-        transactions.push({
-          customer: this.capitalize(customer),
-          details: `Isanwo fun ${this.capitalize(details)}`,
-          amount,
-          type: 'income',
-        });
+    let match;
+    while ((match = incomePattern.exec(normalizedText)) !== null) {
+      if (match.groups?.amount) {
+        const amount = this.convertTextToNumber(match.groups.amount.trim());
+        this.logger.debug(
+          `V3 Found Income Amount (text): "${match.groups.amount}", (parsed): ${amount}`,
+        );
+        if (amount > 0) {
+          transactions.push({
+            customer: this.capitalize(customer),
+            details: `Isanwo fun ${this.capitalize(details)}`,
+            amount,
+            type: 'income',
+          });
+        }
       }
     }
 
-    if (debtMatch?.groups?.amount) {
-      const amount = this.convertTextToNumber(debtMatch.groups.amount.trim());
-      this.logger.debug(
-        `Found Debt Amount (text): "${debtMatch.groups.amount}", (parsed): ${amount}`,
-      );
-      if (amount > 0) {
-        transactions.push({
-          customer: this.capitalize(customer),
-          details: `Gbese fun ${this.capitalize(details)}`,
-          amount,
-          type: 'debt',
-        });
+    while ((match = debtPattern.exec(normalizedText)) !== null) {
+      if (match.groups?.amount) {
+        const amount = this.convertTextToNumber(match.groups.amount.trim());
+        this.logger.debug(
+          `V3 Found Debt Amount (text): "${match.groups.amount}", (parsed): ${amount}`,
+        );
+        if (amount > 0) {
+          transactions.push({
+            customer: this.capitalize(customer),
+            details: `Gbese fun ${this.capitalize(details)}`,
+            amount,
+            type: 'debt',
+          });
+        }
       }
     }
 
     if (transactions.length === 0) {
-      this.logger.warn('V2 Parsing failed to find any valid transactions.');
+      this.logger.warn('V3 Parsing failed to find any valid transactions.');
     }
 
     return transactions;
@@ -329,50 +334,44 @@ export class AkawoService {
   }
 
   private convertTextToNumber(text: string): number {
-    if (!isNaN(parseInt(text, 10))) return parseInt(text, 10);
+    const numberMap: { [key: string]: { value: number; multiplier: boolean } } =
+      {
+        kan: { value: 1, multiplier: false },
+        meji: { value: 2, multiplier: false },
+        meta: { value: 3, multiplier: false },
+        mewa: { value: 10, multiplier: false },
+        ogun: { value: 20, multiplier: false },
+        ogbon: { value: 30, multiplier: false },
+        igba: { value: 200, multiplier: true },
+        egberun: { value: 1000, multiplier: true },
+        thousand: { value: 1000, multiplier: true },
+      };
 
-    const numberMap: { [key: string]: number } = {
-      kan: 1,
-      meji: 2,
-      meta: 3,
-      merin: 4,
-      marun: 5,
-      mefa: 6,
-      meje: 7,
-      mejo: 8,
-      mesan: 9,
-      mewa: 10,
-      ogun: 20,
-      ogbon: 30,
-      ogoji: 40,
-      aadota: 50,
-      igba: 200,
-      egberun: 1000,
-      puku: 1000,
-      nari: 100,
-      thirty: 30,
-      fifty: 50,
-      thousand: 1000,
-    };
+    let total = 0;
+    const words = text.toLowerCase().replace(/,/g, '').split(/\s+/);
 
-    const words = text
-      .toLowerCase()
-      .trim()
-      .split(/[\s-]+/);
-
-    if (
-      words.length === 2 &&
-      numberMap[words[0]] >= 1000 &&
-      numberMap[words[1]] < 10
-    ) {
-      return numberMap[words[0]] * numberMap[words[1]];
+    let currentVal = 0;
+    for (const word of words) {
+      if (!isNaN(parseInt(word))) {
+        currentVal += parseInt(word);
+      } else if (numberMap[word]) {
+        if (numberMap[word].multiplier) {
+          currentVal =
+            currentVal === 0
+              ? numberMap[word].value
+              : currentVal * numberMap[word].value;
+        } else {
+          currentVal += numberMap[word].value;
+        }
+      } else if (word === 'o' || word === 'le') {
+        // Handle Yoruba "and" for addition
+        total += currentVal;
+        currentVal = 0;
+      }
     }
+    total += currentVal;
 
-    if (words.length === 1 && numberMap[words[0]]) {
-      return numberMap[words[0]];
-    }
-
-    return parseInt(text.replace(/,/g, ''), 10) || 0;
+    return total > 0 ? total : parseInt(text.replace(/,/g, '')) || 0;
   }
 
   private getVoiceForLanguage(
