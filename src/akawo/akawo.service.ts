@@ -15,8 +15,14 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createReadStream } from 'fs';
-// FIX: Changed the import style to correctly import the callable function
 import ffmpeg = require('fluent-ffmpeg');
+// FIX: Import the File class from Node's buffer module
+import { File } from 'node:buffer';
+
+// Polyfill for the global File object, required by the Spitch SDK in Node.js < 20
+if (typeof globalThis.File === 'undefined') {
+  globalThis.File = File as any;
+}
 
 type ParsedTransaction = {
   customer: string;
