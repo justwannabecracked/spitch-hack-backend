@@ -10,8 +10,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-// Node.js built-in Blob for correctly packaging file data
-import { Blob } from 'buffer';
+// Node.js built-in modules for handling files, paths, and streams
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
+import { createReadStream } from 'fs';
 
 type ParsedTransaction = {
   customer: string;
@@ -48,21 +51,29 @@ export class AkawoService {
       `Processing audio command for user ${userId} in language: ${language}`,
     );
 
+    // Define a temporary file path in the server's OS-agnostic temp directory
+    const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.webm`);
     let transcriptionResponse;
+
     try {
       // --- THE DEFINITIVE FIX ---
-      // 1. Package the raw audio buffer into a standard Blob object.
-      // 2. We give it a 'type' hint so the API knows what kind of audio it is.
-      const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
+      // 1. Write the audio buffer received from the frontend to a temporary file.
+      await fs.writeFile(tempFilePath, audioBuffer);
+      this.logger.log(`Audio buffer saved to temporary file: ${tempFilePath}`);
 
-      // 3. Send the Blob to Spitch. We use 'as any' to bypass the SDK's
-      //    incomplete TypeScript definitions. The underlying code handles Blobs correctly.
+      // 2. Create a standard Node.js ReadStream from that file.
+      const fileStream = createReadStream(tempFilePath);
+
+      // 3. Send the file stream to Spitch. This is a robust method for file uploads.
       transcriptionResponse = await this.spitch.speech.transcribe({
-        content: audioBlob as any,
+        content: fileStream as any, // 'as any' is still needed for TypeScript
         language,
       });
     } catch (error) {
-      this.logger.error('Error during Spitch transcription', error.stack);
+      this.logger.error(
+        'Error during file handling or Spitch transcription',
+        error.stack,
+      );
       if (error.status && error.error?.detail) {
         throw new BadRequestException(
           `Spitch API Error: ${error.error.detail}`,
@@ -71,6 +82,17 @@ export class AkawoService {
       throw new InternalServerErrorException(
         'A server error occurred while processing the audio.',
       );
+    } finally {
+      // 4. IMPORTANT: Clean up and delete the temporary file after the API call.
+      try {
+        await fs.unlink(tempFilePath);
+        this.logger.log(`Temporary file deleted: ${tempFilePath}`);
+      } catch (cleanupError) {
+        this.logger.error(
+          `Failed to delete temporary file: ${tempFilePath}`,
+          cleanupError,
+        );
+      }
     }
 
     const transcribedText = transcriptionResponse.text;
