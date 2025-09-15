@@ -2,17 +2,12 @@ import {
   Controller,
   Post,
   UseGuards,
-  UseInterceptors,
-  UploadedFile,
   Request,
   Body,
   Get,
-  ParseFilePipe,
-  MaxFileSizeValidator,
   Logger,
-  BadRequestException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+// We no longer need FileInterceptor or UploadedFile, so they are removed.
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AkawoService } from './akawo.service';
 
@@ -24,32 +19,20 @@ export class AkawoController {
 
   @UseGuards(JwtAuthGuard)
   @Post('process-audio')
-  @UseInterceptors(FileInterceptor('audio'))
   async processAudio(
-    @UploadedFile(
-      new ParseFilePipe({
-        validators: [
-          new MaxFileSizeValidator({ maxSize: 1000000 }), // 1 MB limit
-        ],
-      }),
-    )
-    file: Express.Multer.File,
     @Request() req: { user: { sub: string } },
-    @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en' },
+    @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en'; audio: string },
   ) {
     this.logger.log(
-      `Received file: ${file.originalname}, size: ${file.size}, type: ${file.mimetype}`,
+      `Received process-audio request for user ${req.user.sub} in language: ${body.language}`,
     );
 
-    if (!file.mimetype.startsWith('audio/')) {
-      throw new BadRequestException(
-        'Validation failed: Uploaded file is not an audio file.',
-      );
-    }
-
     const userId = req.user.sub;
+
+    const audioBuffer = Buffer.from(body.audio, 'base64');
+
     return this.akawoService.processAudioCommand(
-      file.buffer,
+      audioBuffer,
       userId,
       body.language,
     );
