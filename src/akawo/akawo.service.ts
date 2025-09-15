@@ -170,7 +170,6 @@ export class AkawoService {
     });
   }
 
-  // ... (The rest of your service file remains the same)
   private async handleTransactionLogging(
     text: string,
     userId: string,
@@ -259,35 +258,51 @@ export class AkawoService {
   }
 
   private parseTransactionText(text: string): ParsedTransaction | null {
-    console.log(`Parsing text: "${text}"`);
-    const patterns = {
-      debt: /(?<customer>[\w\s]+?)\s(?:gba|ji|owes|took|collected)\s(?<amount>[\w\s\d]+?)(?:\sfun|\sfor)?\s?(?<details>[\w\s]+)?$/i,
-      income:
-        /(?<customer>[\w\s]+?)\s(?:san|kwụrụ|paid|gave me)\s(?<amount>[\w\s\d]+?)(?:\sfun|\sfor)?\s?(?<details>[\w\s]+)?$/i,
-    };
+    this.logger.debug(`Parsing text: "${text}"`);
 
-    let match = text.match(patterns.debt);
-    let type: 'debt' | 'income' = 'debt';
+    const debtPattern = /kú\s(?<amount>[\w\s\d]+)/i;
+    const incomePattern = /san\s(?<amount>[\w\s\d]+)/i;
+    const customerPattern = /fún\s(?<customer>[\w\s]+?)(?:,|$)/i;
+    const detailsPattern = /(?:ta|sold)\s(?<details>.*?)\s?fún/i;
 
-    if (!match) {
-      match = text.match(patterns.income);
+    const debtMatch = text.match(debtPattern);
+    const incomeMatch = text.match(incomePattern);
+    const customerMatch = text.match(customerPattern);
+    const detailsMatch = text.match(detailsPattern);
+
+    let amount = 0;
+    let type: 'debt' | 'income' | null = null;
+
+    if (debtMatch?.groups?.amount) {
+      amount = this.convertTextToNumber(debtMatch.groups.amount.trim());
+      type = 'debt';
+    } else if (incomeMatch?.groups?.amount) {
+      amount = this.convertTextToNumber(incomeMatch.groups.amount.trim());
       type = 'income';
     }
 
-    if (match?.groups) {
-      const { customer, amount: amountStr, details } = match?.groups;
-      const amount = this.convertTextToNumber(amountStr.trim());
-
-      if (customer && amount > 0) {
-        return {
-          customer: customer.trim(),
-          details: details?.trim() || 'General transaction',
-          amount,
-          type,
-        };
-      }
+    if (!type || amount === 0) {
+      this.logger.warn(
+        'Parsing failed to find a valid amount and transaction type.',
+      );
+      return null;
     }
-    return null;
+
+    const customer =
+      customerMatch?.groups?.customer.trim().replace(/,/g, '') ||
+      'Unknown Customer';
+    const details = detailsMatch?.groups?.details.trim() || 'Transaction';
+
+    return {
+      customer: this.capitalize(customer),
+      details: this.capitalize(details),
+      amount,
+      type,
+    };
+  }
+
+  private capitalize(s: string): string {
+    return s.charAt(0).toUpperCase() + s.slice(1);
   }
 
   private convertTextToNumber(text: string): number {
@@ -322,32 +337,22 @@ export class AkawoService {
       .trim()
       .split(/[\s-]+/);
     let total = 0;
-    let multiplier = 1;
 
-    for (const word of words.reverse()) {
-      const value = numberMap[word];
-      if (value) {
-        if (value >= 1000) {
-          total += multiplier * value;
-          multiplier = 1;
-        } else {
-          multiplier = multiplier === 1 ? value : multiplier * value;
-        }
-      }
-    }
-    total += multiplier > 1 ? multiplier : 0;
-
-    if (words.includes('egberun') && total < 1000) {
-      const thousandIndex = words.indexOf('egberun');
-      if (thousandIndex > 0) {
-        const multiplierWord = words[thousandIndex - 1];
-        if (numberMap[multiplierWord]) {
-          return numberMap[multiplierWord] * 1000;
-        }
-      }
+    // Example: "egberun meji" -> [egberun, meji]
+    if (
+      words.length === 2 &&
+      numberMap[words[0]] >= 1000 &&
+      numberMap[words[1]] < 10
+    ) {
+      return numberMap[words[0]] * numberMap[words[1]];
     }
 
-    return total > 0 ? total : parseInt(text.replace(/,/g, ''), 10) || 0;
+    // Simple lookup for single words
+    if (words.length === 1 && numberMap[words[0]]) {
+      return numberMap[words[0]];
+    }
+
+    return parseInt(text.replace(/,/g, ''), 10) || 0;
   }
 
   private getVoiceForLanguage(
@@ -390,14 +395,22 @@ export class AkawoService {
   private async generateSpeech(
     text: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
-  ): Promise<string> {
-    const voice = this.getVoiceForLanguage(language);
-    const ttsResponse = await this.spitch.speech.generate({
-      text,
-      language,
-      voice,
-    });
-    return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
+  ): Promise<string | null> {
+    try {
+      const voice = this.getVoiceForLanguage(language);
+      const ttsResponse = await this.spitch.speech.generate({
+        text,
+        language,
+        voice,
+      });
+      return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
+    } catch (error) {
+      this.logger.error(
+        `Spitch TTS API failed for text: "${text}"`,
+        error.stack,
+      );
+      return null;
+    }
   }
 
   private formatDebtorList(debtors: Transaction[], lang: string): string {
