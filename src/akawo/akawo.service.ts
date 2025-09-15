@@ -10,7 +10,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-import { Blob } from 'buffer';
 
 type ParsedTransaction = {
   customer: string;
@@ -49,15 +48,19 @@ export class AkawoService {
 
     let transcriptionResponse;
     try {
-      // --- THE FIX ---
-      // 1. Package the raw audio buffer into a standard Blob object.
-      // 2. We give it a 'type' hint so the API knows what kind of audio it is.
-      const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
+      // --- THE DEFINITIVE FIX (NO FFMPEG or BLOB) ---
+      // 1. We create a file-like object that the SDK's internal form-data
+      //    library will correctly interpret as a single file.
+      // 2. We provide the raw buffer and a filename. This is the key.
+      const audioFile = {
+        buffer: audioBuffer,
+        filename: 'transaction.webm',
+      };
 
-      // 3. Send the Blob to Spitch. We use 'as any' to bypass the SDK's
-      //    incomplete TypeScript definitions. The underlying code handles Blobs correctly.
+      // 3. We send this file-like object. The 'as any' is still needed to
+      //    bypass the SDK's incomplete TypeScript definitions.
       transcriptionResponse = await this.spitch.speech.transcribe({
-        content: audioBlob as any,
+        content: audioFile as any,
         language,
       });
     } catch (error) {
@@ -203,7 +206,7 @@ export class AkawoService {
     }
 
     if (match?.groups) {
-      const { customer, amount: amountStr, details } = match.groups;
+      const { customer, amount: amountStr, details } = match?.groups;
       const amount = this.convertTextToNumber(amountStr.trim());
 
       if (customer && amount > 0) {
