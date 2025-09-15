@@ -1,18 +1,19 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { AkawoService } from './akawo.service';
+import { MulterModule } from '@nestjs/platform-express';
 import { AkawoController } from './akawo.controller';
+import { AkawoService } from './akawo.service';
 import { Transaction, TransactionSchema } from './schemas/transaction.schema';
-import { ConfigModule } from '@nestjs/config';
+import { multerConfig } from '../config/multer-config';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Transaction.name, schema: TransactionSchema },
     ]),
-    ConfigModule,
+    MulterModule.register(multerConfig),
   ],
-  providers: [AkawoService],
   controllers: [AkawoController],
+  providers: [AkawoService],
 })
 export class AkawoModule {}

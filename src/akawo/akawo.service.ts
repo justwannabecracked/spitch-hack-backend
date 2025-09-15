@@ -14,7 +14,6 @@ import Spitch from 'spitch';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { createReadStream } from 'fs';
 import ffmpeg = require('fluent-ffmpeg');
 import { File } from 'node:buffer';
 import {
@@ -88,19 +87,15 @@ export class AkawoService {
   }
 
   async processAudioCommand(
-    audioBuffer: Buffer,
+    tempFilePath: string,
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en' = 'en',
   ) {
-    this.logger.log(
-      `Processing audio command for user ${userId} in language: ${language}`,
-    );
+    this.logger.log(`Processing audio file at path: ${tempFilePath}`);
 
     try {
-      // --- THE NEW TWO-STEP AI BRAIN ---
-      // Step 1: Get a high-quality transcription from Gemini
       const transcribedText = await this.transcribeAudioWithGemini(
-        audioBuffer,
+        tempFilePath,
         language,
       );
 
@@ -111,9 +106,12 @@ export class AkawoService {
       }
       this.logger.log(`Gemini Transcribed Text: "${transcribedText}"`);
 
-      // Step 2: Use the high-quality text to determine the user's intent
       const intent = this.determineIntent(transcribedText);
       this.logger.log(`Determined Intent: "${intent}"`);
+
+      // After processing, clean up the original uploaded file
+      await fs.unlink(tempFilePath);
+      this.logger.log(`Cleaned up temporary upload file: ${tempFilePath}`);
 
       switch (intent) {
         case 'log_transaction':
@@ -137,6 +135,15 @@ export class AkawoService {
           });
       }
     } catch (error) {
+      // Ensure cleanup happens even if there's an error
+      await fs
+        .unlink(tempFilePath)
+        .catch((e) =>
+          this.logger.error(
+            `Failed to clean up file on error: ${tempFilePath}`,
+            e,
+          ),
+        );
       this.logger.error('Error in main audio processing pipeline', error.stack);
       if (error instanceof BadRequestException) throw error;
       throw new InternalServerErrorException(
@@ -145,34 +152,59 @@ export class AkawoService {
     }
   }
 
-  /**
-   * New function to get transcription from Gemini.
-   */
   private async transcribeAudioWithGemini(
-    audioBuffer: Buffer,
+    filePath: string,
     language: string,
   ): Promise<string | null> {
-    this.logger.debug('Transcribing audio with Gemini...');
+    this.logger.debug('Transcribing audio with Gemini from file path...');
     const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const wavBuffer = await this.convertWebmToWav(audioBuffer);
 
-    const audioPart = {
-      inlineData: {
-        data: wavBuffer.toString('base64'),
-        mimeType: 'audio/wav',
-      },
-    };
+    // Convert the original webm file to a wav file for Gemini
+    const wavFilePath = await this.convertWebmToWav(filePath);
 
-    // Simple, direct prompt for transcription
     const prompt = `Transcribe the following audio recording. The primary language is ${language}.`;
 
     try {
+      const audioBuffer = await fs.readFile(wavFilePath);
+      const audioPart = {
+        inlineData: {
+          data: audioBuffer.toString('base64'),
+          mimeType: 'audio/wav',
+        },
+      };
+
       const result = await model.generateContent([prompt, audioPart]);
       return result.response.text().trim();
     } catch (error) {
       this.logger.error('Error during Gemini transcription', error);
       return null;
+    } finally {
+      // Clean up the converted wav file
+      await fs
+        .unlink(wavFilePath)
+        .catch((e) => this.logger.error('Failed to clean up WAV file', e));
     }
+  }
+
+  private convertWebmToWav(inputPath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const outputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
+      ffmpeg(inputPath)
+        .toFormat('wav')
+        .on('error', (err) => {
+          this.logger.error('FFmpeg error:', err.message);
+          reject(
+            new InternalServerErrorException('Failed to convert audio file.'),
+          );
+        })
+        .on('end', () => {
+          this.logger.log(
+            `Successfully converted ${inputPath} to ${outputPath}`,
+          );
+          resolve(outputPath);
+        })
+        .save(outputPath);
+    });
   }
 
   private async handleTransactionLogging(
@@ -180,7 +212,6 @@ export class AkawoService {
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ) {
-    // Now this function receives high-quality text
     const parsedTransactions = await this.parseIntelligentV4(text);
 
     if (parsedTransactions.length === 0) {
@@ -220,9 +251,6 @@ export class AkawoService {
     };
   }
 
-  /**
-   * V4 - The Text-to-JSON Intelligent Parser (Now receives clean text)
-   */
   private async parseIntelligentV4(text: string): Promise<ParsedTransaction[]> {
     this.logger.debug(`V4 Parsing with LLM. Input text: "${text}"`);
 
@@ -287,42 +315,6 @@ export class AkawoService {
   }
 
   // --- All other helper functions remain the same ---
-  // ... (convertWebmToWav, handleDebtorQuery, getTransactionsForUser, etc.)
-  private convertWebmToWav(inputBuffer: Buffer): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const tempInputPath = path.join(os.tmpdir(), `input-${Date.now()}.webm`);
-      const tempOutputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
-
-      fs.writeFile(tempInputPath, inputBuffer)
-        .then(() => {
-          ffmpeg(tempInputPath)
-            .toFormat('wav')
-            .on('error', (err) => {
-              this.logger.error('FFmpeg error:', err.message);
-              fs.unlink(tempInputPath).catch((e) =>
-                this.logger.error('Failed to clean up input file', e),
-              );
-              reject(
-                new InternalServerErrorException(
-                  'Failed to convert audio file.',
-                ),
-              );
-            })
-            .on('end', () => {
-              fs.readFile(tempOutputPath)
-                .then(async (outputBuffer) => {
-                  await fs.unlink(tempInputPath);
-                  await fs.unlink(tempOutputPath);
-                  resolve(outputBuffer);
-                })
-                .catch(reject);
-            })
-            .save(tempOutputPath);
-        })
-        .catch(reject);
-    });
-  }
-
   private async handleDebtorQuery(
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',

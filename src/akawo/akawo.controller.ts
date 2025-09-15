@@ -2,12 +2,15 @@ import {
   Controller,
   Post,
   UseGuards,
+  UseInterceptors,
+  UploadedFile,
   Request,
   Body,
   Get,
   Logger,
+  BadRequestException,
 } from '@nestjs/common';
-// We no longer need FileInterceptor or UploadedFile, so they are removed.
+import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AkawoService } from './akawo.service';
 
@@ -19,20 +22,26 @@ export class AkawoController {
 
   @UseGuards(JwtAuthGuard)
   @Post('process-audio')
+  @UseInterceptors(FileInterceptor('audio'))
   async processAudio(
+    // The @UploadedFile decorator now provides a file object with a path property.
+    @UploadedFile() file: Express.Multer.File,
     @Request() req: { user: { sub: string } },
-    @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en'; audio: string },
+    @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en' },
   ) {
+    // A crucial check to ensure a file was actually uploaded.
+    if (!file) {
+      throw new BadRequestException('No audio file uploaded.');
+    }
+
     this.logger.log(
-      `Received process-audio request for user ${req.user.sub} in language: ${body.language}`,
+      `File upload complete. Path: ${file.path}, Size: ${file.size} bytes`,
     );
 
     const userId = req.user.sub;
-
-    const audioBuffer = Buffer.from(body.audio, 'base64');
-
+    // We now pass the file path to the service instead of the in-memory buffer.
     return this.akawoService.processAudioCommand(
-      audioBuffer,
+      file.path,
       userId,
       body.language,
     );
