@@ -97,64 +97,91 @@ export class AkawoService {
     );
 
     try {
-      // Use a temporary text file to get the initial transcription for intent routing
-      const tempWavPath = path.join(
-        os.tmpdir(),
-        `intent-audio-${Date.now()}.wav`,
-      );
-      await fs.writeFile(tempWavPath, await this.convertWebmToWav(audioBuffer));
-      const fileStream = createReadStream(tempWavPath);
-      const transcriptionResponse = await this.spitch.speech.transcribe({
-        content: fileStream as any,
+      // --- THE NEW TWO-STEP AI BRAIN ---
+      // Step 1: Get a high-quality transcription from Gemini
+      const transcribedText = await this.transcribeAudioWithGemini(
+        audioBuffer,
         language,
-      });
-      await fs.unlink(tempWavPath);
+      );
 
-      if (!transcriptionResponse.text) {
+      if (!transcribedText) {
         throw new BadRequestException(
-          'I could not hear anything. Please speak clearly.',
+          'I could not understand the audio. Please speak clearly.',
         );
       }
+      this.logger.log(`Gemini Transcribed Text: "${transcribedText}"`);
 
-      this.logger.log(
-        `Transcribed Text for Intent: "${transcriptionResponse.text}"`,
-      );
-      const intent = this.determineIntent(transcriptionResponse.text);
+      // Step 2: Use the high-quality text to determine the user's intent
+      const intent = this.determineIntent(transcribedText);
       this.logger.log(`Determined Intent: "${intent}"`);
 
-      if (intent === 'query_debtors') {
-        return this.handleDebtorQuery(userId, language);
+      switch (intent) {
+        case 'log_transaction':
+          return this.handleTransactionLogging(
+            transcribedText,
+            userId,
+            language,
+          );
+        case 'query_debtors':
+          return this.handleDebtorQuery(userId, language);
+        default:
+          const errorText = this.generateErrorMessage(language);
+          const errorAudio = await this.generateSpeech(
+            errorText,
+            language,
+            userId,
+          );
+          throw new BadRequestException({
+            message: errorText,
+            audioContent: errorAudio,
+          });
       }
-
-      // If the intent is to log a transaction, use Gemini for high-accuracy parsing from audio
-      return this.handleTransactionLoggingWithGemini(
-        audioBuffer,
-        userId,
-        language,
-      );
     } catch (error) {
       this.logger.error('Error in main audio processing pipeline', error.stack);
-      const errorText = this.generateErrorMessage(language);
-      const errorAudio = await this.generateSpeech(errorText, language, userId);
-      throw new BadRequestException({
-        message: errorText,
-        audioContent: errorAudio,
-      });
+      if (error instanceof BadRequestException) throw error;
+      throw new InternalServerErrorException(
+        'A server error occurred while processing your request.',
+      );
     }
   }
 
-  private async handleTransactionLoggingWithGemini(
+  /**
+   * New function to get transcription from Gemini.
+   */
+  private async transcribeAudioWithGemini(
     audioBuffer: Buffer,
+    language: string,
+  ): Promise<string | null> {
+    this.logger.debug('Transcribing audio with Gemini...');
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const wavBuffer = await this.convertWebmToWav(audioBuffer);
+
+    const audioPart = {
+      inlineData: {
+        data: wavBuffer.toString('base64'),
+        mimeType: 'audio/wav',
+      },
+    };
+
+    // Simple, direct prompt for transcription
+    const prompt = `Transcribe the following audio recording. The primary language is ${language}.`;
+
+    try {
+      const result = await model.generateContent([prompt, audioPart]);
+      return result.response.text().trim();
+    } catch (error) {
+      this.logger.error('Error during Gemini transcription', error);
+      return null;
+    }
+  }
+
+  private async handleTransactionLogging(
+    text: string,
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ) {
-    this.logger.log(
-      'Handling transaction logging with Gemini V5 multimodal...',
-    );
-
-    // Convert the original audio buffer to WAV for Gemini
-    const wavBuffer = await this.convertWebmToWav(audioBuffer);
-    const parsedTransactions = await this.parseIntelligentV5(wavBuffer);
+    // Now this function receives high-quality text
+    const parsedTransactions = await this.parseIntelligentV4(text);
 
     if (parsedTransactions.length === 0) {
       const errorText = this.generateErrorMessage(language);
@@ -194,13 +221,10 @@ export class AkawoService {
   }
 
   /**
-   * V5 - The Multimodal LLM-Powered Intelligent Parser
-   * This function takes the AUDIO BUFFER directly.
+   * V4 - The Text-to-JSON Intelligent Parser (Now receives clean text)
    */
-  private async parseIntelligentV5(
-    audioBuffer: Buffer,
-  ): Promise<ParsedTransaction[]> {
-    this.logger.debug(`V5 Parsing with Gemini Multimodal Audio.`);
+  private async parseIntelligentV4(text: string): Promise<ParsedTransaction[]> {
+    this.logger.debug(`V4 Parsing with LLM. Input text: "${text}"`);
 
     const safetySettings = [
       {
@@ -228,35 +252,21 @@ export class AkawoService {
 
     const systemPrompt = `
       You are an expert accounting assistant for a Nigerian market trader named Akawo.
-      Your task is to LISTEN to a voice command in a Nigerian language (English, Yoruba, Igbo, Hausa) and extract transaction details with precision.
-
-      You will be given an audio file. You must identify these key entities from the speech:
-      1.  "customer": The name of the person involved.
-      2.  "details": The item or service that was sold.
-      3.  "income": The amount of money PAID.
-      4.  "debt": The amount of money REMAINING or OWED.
-
+      Your task is to analyze transcribed voice commands in Nigerian languages (English, Yoruba, Igbo, Hausa) and extract transaction details with precision.
+      Keywords for PAID: "san", "sanwo", "paid", "kwụrụ", "biya".
+      Keywords for DEBT/OWED: "ku", "kú", "owes", "remaining", "ji", "karbi".
       RULES:
-      - A single command can contain both an income and a debt.
-      - If you cannot identify a customer, use a generic term like "Customer" or "Oníbàárà".
-      - If you cannot identify details, use a generic term like "Goods" or "Ọjà".
-      - Your response MUST be a valid JSON array of objects.
-      - Each object in the array represents a single transaction and must have the keys: "customer", "details", "amount", and "type" (either "income" or "debt").
-      - If you cannot understand the audio or find any valid transaction details, return an empty array: [].
+      - A sentence can contain both an income and a debt.
+      - If no customer is found, use "Oníbàárà". If no details are found, use "Ọjà".
+      - Convert spoken numbers (e.g., "ẹgbẹ̀rún méjì") into digits (e.g., 2000).
+      - Your response MUST be a valid JSON array of objects with keys: "customer", "details", "amount", and "type" ("income" or "debt").
+      - If no valid transaction is found, return an empty array: [].
     `;
 
     try {
-      const audioPart = {
-        inlineData: {
-          data: audioBuffer.toString('base64'),
-          mimeType: 'audio/wav',
-        },
-      };
-
-      const result = await model.generateContent([systemPrompt, audioPart]);
+      const result = await model.generateContent([systemPrompt, text]);
       const llmResponseText = result.response.text();
-      this.logger.debug(`LLM Raw Response from Audio: ${llmResponseText}`);
-
+      this.logger.debug(`LLM Raw JSON Response: ${llmResponseText}`);
       const cleanedJson = llmResponseText
         .replace(/```json/g, '')
         .replace(/```/g, '')
@@ -269,7 +279,7 @@ export class AkawoService {
       return [];
     } catch (error) {
       this.logger.error(
-        'Error calling or parsing response from Gemini API with audio',
+        'Error calling or parsing response from Gemini API for JSON extraction',
         error,
       );
       return [];
@@ -277,7 +287,7 @@ export class AkawoService {
   }
 
   // --- All other helper functions remain the same ---
-  // ... (convertWebmToWav, handleDebtorQuery, getTransactionsForUser, determineIntent, etc.)
+  // ... (convertWebmToWav, handleDebtorQuery, getTransactionsForUser, etc.)
   private convertWebmToWav(inputBuffer: Buffer): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const tempInputPath = path.join(os.tmpdir(), `input-${Date.now()}.webm`);
