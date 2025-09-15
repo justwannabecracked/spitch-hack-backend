@@ -10,12 +10,18 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
+// Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createReadStream } from 'fs';
 import ffmpeg = require('fluent-ffmpeg');
 import { File } from 'node:buffer';
+import {
+  GoogleGenerativeAI,
+  HarmCategory,
+  HarmBlockThreshold,
+} from '@google/generative-ai';
 
 // Polyfill for the global File object, required by the Spitch SDK in Node.js < 20
 if (typeof globalThis.File === 'undefined') {
@@ -30,22 +36,56 @@ type ParsedTransaction = {
 };
 type Intent = 'log_transaction' | 'query_debtors' | 'unknown';
 
+// Define a type for the valid Spitch voices for better type safety
+type SpitchVoice =
+  | 'sade'
+  | 'segun'
+  | 'femi'
+  | 'funmi'
+  | 'amina'
+  | 'aliyu'
+  | 'hasan'
+  | 'zainab'
+  | 'john'
+  | 'jude'
+  | 'lina'
+  | 'lucy'
+  | 'henry'
+  | 'kani'
+  | 'ngozi'
+  | 'amara'
+  | 'obinna'
+  | 'ebuka'
+  | 'hana'
+  | 'selam'
+  | 'tena'
+  | 'tesfaye';
+
 @Injectable()
 export class AkawoService {
   private spitch: Spitch;
   private readonly logger = new Logger(AkawoService.name);
+  private genAI: GoogleGenerativeAI;
 
   constructor(
     private configService: ConfigService,
     @InjectModel(Transaction.name) private transactionModel: Model<Transaction>,
   ) {
-    const apiKey = this.configService.get<string>('SPITCH_API_KEY');
-    if (!apiKey) {
+    const spitchApiKey = this.configService.get<string>('SPITCH_API_KEY');
+    if (!spitchApiKey) {
       throw new Error(
         'SPITCH_API_KEY is not defined in environment variables.',
       );
     }
-    this.spitch = new Spitch({ apiKey });
+    this.spitch = new Spitch({ apiKey: spitchApiKey });
+
+    const geminiApiKey = this.configService.get<string>('GEMINI_API_KEY');
+    if (!geminiApiKey) {
+      throw new Error(
+        'GEMINI_API_KEY is not defined in environment variables.',
+      );
+    }
+    this.genAI = new GoogleGenerativeAI(geminiApiKey);
   }
 
   async processAudioCommand(
@@ -118,7 +158,11 @@ export class AkawoService {
         return this.handleDebtorQuery(userId, language);
       default:
         const errorText = this.generateErrorMessage(language);
-        const errorAudio = await this.generateSpeech(errorText, language);
+        const errorAudio = await this.generateSpeech(
+          errorText,
+          language,
+          userId,
+        );
         throw new BadRequestException({
           message: errorText,
           audioContent: errorAudio,
@@ -166,11 +210,11 @@ export class AkawoService {
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ) {
-    const parsedTransactions = this.parseIntelligent(text);
+    const parsedTransactions = await this.parseIntelligentV4(text);
 
     if (parsedTransactions.length === 0) {
       const errorText = this.generateErrorMessage(language);
-      const errorAudio = await this.generateSpeech(errorText, language);
+      const errorAudio = await this.generateSpeech(errorText, language, userId);
       throw new BadRequestException({
         message: errorText,
         audioContent: errorAudio,
@@ -191,7 +235,11 @@ export class AkawoService {
       savedTransactions,
       language,
     );
-    const audioContent = await this.generateSpeech(confirmationText, language);
+    const audioContent = await this.generateSpeech(
+      confirmationText,
+      language,
+      userId,
+    );
 
     return {
       type: 'transaction_logged',
@@ -213,7 +261,11 @@ export class AkawoService {
         ? this.formatDebtorList(debtors, language)
         : this.generateNoDebtorsMessage(language);
 
-    const audioContent = await this.generateSpeech(responseText, language);
+    const audioContent = await this.generateSpeech(
+      responseText,
+      language,
+      userId,
+    );
 
     return {
       type: 'query_response',
@@ -231,7 +283,15 @@ export class AkawoService {
 
   private determineIntent(text: string): Intent {
     const lowerText = this.normalizeTextForParsing(text);
-    const queryKeywords = ['tani', 'who', 'list', 'show me', 'awon to je'];
+    const queryKeywords = [
+      'tani',
+      'who',
+      'list',
+      'show me',
+      'awon to je',
+      'ndi ji',
+      'su wanene',
+    ];
     const transactionKeywords = [
       'gba',
       'ji',
@@ -244,6 +304,9 @@ export class AkawoService {
       'sold',
       'ta',
       'ku',
+      'remaining',
+      'biya',
+      'karbi',
     ];
 
     if (queryKeywords.some((kw) => lowerText.includes(kw))) {
@@ -255,71 +318,96 @@ export class AkawoService {
     return 'unknown';
   }
 
-  /**
-   * V3 - Intelligent Parser
-   */
-  private parseIntelligent(text: string): ParsedTransaction[] {
-    this.logger.debug(`V3 Parsing original text: "${text}"`);
-    const transactions: ParsedTransaction[] = [];
-    const normalizedText = this.normalizeTextForParsing(text);
-    this.logger.debug(`Normalized text for V3 parsing: "${normalizedText}"`);
+  private async parseIntelligentV4(text: string): Promise<ParsedTransaction[]> {
+    this.logger.debug(`V4 Parsing with LLM. Input text: "${text}"`);
 
-    const customerMatch = normalizedText.match(
-      /(?:fun|to)\s(?<customer>[\w\s]+?)(?:,|$|\sfun|\sto\s)/i,
-    );
-    const customer = customerMatch?.groups?.customer.trim() || 'Onibara';
-    this.logger.debug(`V3 Found Customer: "${customer}"`);
+    const safetySettings = [
+      {
+        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+    ];
 
-    const detailsMatch = normalizedText.match(
-      /(?:ta|sold)\s(?<details>.*?)\s?(?:fun|to)/i,
-    );
-    const details = detailsMatch?.groups?.details.trim() || 'Oja';
-    this.logger.debug(`V3 Found Details: "${details}"`);
+    const model = this.genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash',
+      safetySettings,
+    });
 
-    // Flexible patterns for income and debt amounts
-    const incomePattern = /(?:san|sanwo|paid)\s(?<amount>[\w\s\d,-]+)/gi;
-    const debtPattern = /(?:ku|owes|remaining)\s(?<amount>[\w\s\d,-]+)/gi;
+    const systemPrompt = `
+      You are an expert accounting assistant for a Nigerian market trader named Akawo.
+      Your task is to analyze transcribed voice commands in Nigerian languages (English, Yoruba, Igbo, Hausa) and extract transaction details with precision.
 
-    let match;
-    while ((match = incomePattern.exec(normalizedText)) !== null) {
-      if (match.groups?.amount) {
-        const amount = this.convertTextToNumber(match.groups.amount.trim());
-        this.logger.debug(
-          `V3 Found Income Amount (text): "${match.groups.amount}", (parsed): ${amount}`,
-        );
-        if (amount > 0) {
-          transactions.push({
-            customer: this.capitalize(customer),
-            details: `Isanwo fun ${this.capitalize(details)}`,
-            amount,
-            type: 'income',
-          });
-        }
+      The user will provide a sentence. You must identify these key entities:
+      1.  "customer": The name of the person involved.
+      2.  "details": The item or service that was sold.
+      3.  "income": The amount of money PAID. Keywords include:
+          - Yoruba: "san", "sanwo"
+          - Igbo: "kwụrụ"
+          - Hausa: "biya"
+          - English: "paid"
+      4.  "debt": The amount of money REMAINING or OWED. Keywords include:
+          - Yoruba: "ku", "kú"
+          - Igbo: "ji"
+          - Hausa: "karbi"
+          - English: "owes", "remaining"
+
+      RULES:
+      - A single sentence can contain both an income and a debt.
+      - If you cannot find a customer, use a generic term like "Customer" or "Oníbàárà".
+      - If you cannot find details, use a generic term like "Goods" or "Ọjà".
+      - Convert all spoken numbers (e.g., "ẹgbẹ̀rún méjì", "puku abụọ") into digits (e.g., 2000).
+      - Your response MUST be a valid JSON array of objects.
+      - Each object in the array represents a single transaction and must have the keys: "customer", "details", "amount", and "type" (either "income" or "debt").
+      - If you cannot find any valid transaction details, return an empty array: [].
+
+      Example Input (Yoruba): "Mo ta bàtà fún ìyá Bọ́lá, ó san ẹgbẹ̀rún kan, ó ku ẹgbẹ̀rún méjì."
+      Example Output:
+      [
+        { "customer": "ìyá Bọ́lá", "details": "bàtà", "amount": 1000, "type": "income" },
+        { "customer": "ìyá Bọ́lá", "details": "bàtà", "amount": 2000, "type": "debt" }
+      ]
+
+      Example Input (Igbo): "Ngozi kwụrụ puku abụọ maka akpụkpọ ụkwụ."
+      Example Output:
+      [
+        { "customer": "Ngozi", "details": "akpụkpọ ụkwụ", "amount": 2000, "type": "income" }
+      ]
+    `;
+
+    try {
+      const result = await model.generateContent([systemPrompt, text]);
+      const llmResponseText = result.response.text();
+      this.logger.debug(`LLM Raw Response: ${llmResponseText}`);
+
+      const cleanedJson = llmResponseText
+        .replace(/```json/g, '')
+        .replace(/```/g, '')
+        .trim();
+      const parsedJson = JSON.parse(cleanedJson);
+
+      if (Array.isArray(parsedJson)) {
+        return parsedJson as ParsedTransaction[];
       }
+      return [];
+    } catch (error) {
+      this.logger.error(
+        'Error calling or parsing response from Gemini API',
+        error,
+      );
+      return [];
     }
-
-    while ((match = debtPattern.exec(normalizedText)) !== null) {
-      if (match.groups?.amount) {
-        const amount = this.convertTextToNumber(match.groups.amount.trim());
-        this.logger.debug(
-          `V3 Found Debt Amount (text): "${match.groups.amount}", (parsed): ${amount}`,
-        );
-        if (amount > 0) {
-          transactions.push({
-            customer: this.capitalize(customer),
-            details: `Gbese fun ${this.capitalize(details)}`,
-            amount,
-            type: 'debt',
-          });
-        }
-      }
-    }
-
-    if (transactions.length === 0) {
-      this.logger.warn('V3 Parsing failed to find any valid transactions.');
-    }
-
-    return transactions;
   }
 
   private capitalize(s: string): string {
@@ -333,82 +421,29 @@ export class AkawoService {
       .toLowerCase();
   }
 
-  private convertTextToNumber(text: string): number {
-    const numberMap: { [key: string]: { value: number; multiplier: boolean } } =
-      {
-        kan: { value: 1, multiplier: false },
-        meji: { value: 2, multiplier: false },
-        meta: { value: 3, multiplier: false },
-        mewa: { value: 10, multiplier: false },
-        ogun: { value: 20, multiplier: false },
-        ogbon: { value: 30, multiplier: false },
-        igba: { value: 200, multiplier: true },
-        egberun: { value: 1000, multiplier: true },
-        thousand: { value: 1000, multiplier: true },
-      };
-
-    let total = 0;
-    const words = text.toLowerCase().replace(/,/g, '').split(/\s+/);
-
-    let currentVal = 0;
-    for (const word of words) {
-      if (!isNaN(parseInt(word))) {
-        currentVal += parseInt(word);
-      } else if (numberMap[word]) {
-        if (numberMap[word].multiplier) {
-          currentVal =
-            currentVal === 0
-              ? numberMap[word].value
-              : currentVal * numberMap[word].value;
-        } else {
-          currentVal += numberMap[word].value;
-        }
-      } else if (word === 'o' || word === 'le') {
-        // Handle Yoruba "and" for addition
-        total += currentVal;
-        currentVal = 0;
-      }
-    }
-    total += currentVal;
-
-    return total > 0 ? total : parseInt(text.replace(/,/g, '')) || 0;
-  }
-
+  // This function now returns the specific SpitchVoice type
   private getVoiceForLanguage(
     lang: 'ig' | 'yo' | 'ha' | 'en',
-  ):
-    | 'sade'
-    | 'segun'
-    | 'femi'
-    | 'funmi'
-    | 'amina'
-    | 'aliyu'
-    | 'hasan'
-    | 'zainab'
-    | 'john'
-    | 'jude'
-    | 'lina'
-    | 'lucy'
-    | 'henry'
-    | 'kani'
-    | 'ngozi'
-    | 'amara'
-    | 'obinna'
-    | 'ebuka'
-    | 'hana'
-    | 'selam'
-    | 'tena'
-    | 'tesfaye' {
-    const voiceMap: Record<
-      'yo' | 'ig' | 'ha' | 'en',
-      'sade' | 'ngozi' | 'amina' | 'john'
-    > = {
-      yo: 'sade',
-      ig: 'ngozi',
-      ha: 'amina',
-      en: 'john',
+    userId: string,
+  ): SpitchVoice {
+    // Define lists of voices for each language, typed as SpitchVoice arrays
+    const voiceMap: Record<'yo' | 'ig' | 'ha' | 'en', SpitchVoice[]> = {
+      yo: ['sade', 'segun', 'femi', 'funmi'],
+      ig: ['ngozi', 'amara', 'obinna', 'ebuka'],
+      ha: ['amina', 'aliyu', 'hasan', 'zainab'],
+      en: ['john', 'jude', 'lina', 'lucy', 'henry'],
     };
-    return voiceMap[lang] || 'sade';
+
+    const voices = voiceMap[lang] || voiceMap.yo;
+
+    let hash = 0;
+    for (let i = 0; i < userId.length; i++) {
+      hash = (hash << 5) - hash + userId.charCodeAt(i);
+      hash |= 0;
+    }
+
+    const index = Math.abs(hash) % voices.length;
+    return voices[index];
   }
 
   private normalizeTextForTTS(text: string): string {
@@ -418,15 +453,16 @@ export class AkawoService {
   private async generateSpeech(
     text: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
+    userId: string,
   ): Promise<string | null> {
     try {
-      const voice = this.getVoiceForLanguage(language);
+      const voice = this.getVoiceForLanguage(language, userId);
       const sanitizedText = this.normalizeTextForTTS(text);
 
       const ttsResponse = await this.spitch.speech.generate({
         text: sanitizedText,
         language,
-        voice,
+        voice, // This is now correctly typed as SpitchVoice
       });
       return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
     } catch (error) {
