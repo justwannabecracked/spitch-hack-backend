@@ -10,11 +10,13 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-// Node.js built-in modules for handling files, paths, and streams
+// Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createReadStream } from 'fs';
+// FIX: Changed the import style to correctly import the callable function
+import ffmpeg = require('fluent-ffmpeg');
 
 type ParsedTransaction = {
   customer: string;
@@ -51,27 +53,29 @@ export class AkawoService {
       `Processing audio command for user ${userId} in language: ${language}`,
     );
 
-    // Define a temporary file path in the server's OS-agnostic temp directory
-    const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.webm`);
     let transcriptionResponse;
+    const tempWavPath = path.join(os.tmpdir(), `final-audio-${Date.now()}.wav`);
 
     try {
-      // --- THE DEFINITIVE FIX ---
-      // 1. Write the audio buffer received from the frontend to a temporary file.
-      await fs.writeFile(tempFilePath, audioBuffer);
-      this.logger.log(`Audio buffer saved to temporary file: ${tempFilePath}`);
+      // --- STEP 1: Convert the incoming webm audio to a wav buffer ---
+      this.logger.log('Starting audio conversion from webm to wav...');
+      const wavBuffer = await this.convertWebmToWav(audioBuffer);
+      this.logger.log('Audio conversion successful.');
 
-      // 2. Create a standard Node.js ReadStream from that file.
-      const fileStream = createReadStream(tempFilePath);
+      // --- STEP 2: Write the final WAV buffer to a temporary file ---
+      await fs.writeFile(tempWavPath, wavBuffer);
+      this.logger.log(`WAV buffer saved to temporary file: ${tempWavPath}`);
 
-      // 3. Send the file stream to Spitch. This is a robust method for file uploads.
+      // --- STEP 3: Create a ReadStream from the WAV file and send it to Spitch ---
+      const fileStream = createReadStream(tempWavPath);
+
       transcriptionResponse = await this.spitch.speech.transcribe({
-        content: fileStream as any, // 'as any' is still needed for TypeScript
+        content: fileStream as any,
         language,
       });
     } catch (error) {
       this.logger.error(
-        'Error during file handling or Spitch transcription',
+        'Error during audio conversion or Spitch transcription',
         error.stack,
       );
       if (error.status && error.error?.detail) {
@@ -83,13 +87,13 @@ export class AkawoService {
         'A server error occurred while processing the audio.',
       );
     } finally {
-      // 4. IMPORTANT: Clean up and delete the temporary file after the API call.
+      // --- STEP 4: IMPORTANT - Clean up the temporary WAV file ---
       try {
-        await fs.unlink(tempFilePath);
-        this.logger.log(`Temporary file deleted: ${tempFilePath}`);
+        await fs.unlink(tempWavPath);
+        this.logger.log(`Temporary WAV file deleted: ${tempWavPath}`);
       } catch (cleanupError) {
         this.logger.error(
-          `Failed to delete temporary file: ${tempFilePath}`,
+          `Failed to delete temporary WAV file: ${tempWavPath}`,
           cleanupError,
         );
       }
@@ -122,6 +126,45 @@ export class AkawoService {
     }
   }
 
+  /**
+   * Converts a webm audio buffer to a wav audio buffer using ffmpeg.
+   */
+  private convertWebmToWav(inputBuffer: Buffer): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const tempInputPath = path.join(os.tmpdir(), `input-${Date.now()}.webm`);
+      const tempOutputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
+
+      fs.writeFile(tempInputPath, inputBuffer)
+        .then(() => {
+          ffmpeg(tempInputPath)
+            .toFormat('wav')
+            .on('error', (err) => {
+              this.logger.error('FFmpeg error:', err.message);
+              fs.unlink(tempInputPath).catch((e) =>
+                this.logger.error('Failed to clean up input file', e),
+              );
+              reject(
+                new InternalServerErrorException(
+                  'Failed to convert audio file.',
+                ),
+              );
+            })
+            .on('end', () => {
+              fs.readFile(tempOutputPath)
+                .then(async (outputBuffer) => {
+                  await fs.unlink(tempInputPath);
+                  await fs.unlink(tempOutputPath);
+                  resolve(outputBuffer);
+                })
+                .catch(reject);
+            })
+            .save(tempOutputPath);
+        })
+        .catch(reject);
+    });
+  }
+
+  // ... (The rest of your service file remains the same)
   private async handleTransactionLogging(
     text: string,
     userId: string,
