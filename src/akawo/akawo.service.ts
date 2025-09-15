@@ -63,16 +63,13 @@ export class AkawoService {
     const tempWavPath = path.join(os.tmpdir(), `final-audio-${Date.now()}.wav`);
 
     try {
-      // --- STEP 1: Convert the incoming webm audio to a wav buffer ---
       this.logger.log('Starting audio conversion from webm to wav...');
       const wavBuffer = await this.convertWebmToWav(audioBuffer);
       this.logger.log('Audio conversion successful.');
 
-      // --- STEP 2: Write the final WAV buffer to a temporary file ---
       await fs.writeFile(tempWavPath, wavBuffer);
       this.logger.log(`WAV buffer saved to temporary file: ${tempWavPath}`);
 
-      // --- STEP 3: Create a ReadStream from the WAV file and send it to Spitch ---
       const fileStream = createReadStream(tempWavPath);
 
       transcriptionResponse = await this.spitch.speech.transcribe({
@@ -93,7 +90,6 @@ export class AkawoService {
         'A server error occurred while processing the audio.',
       );
     } finally {
-      // --- STEP 4: IMPORTANT - Clean up the temporary WAV file ---
       try {
         await fs.unlink(tempWavPath);
         this.logger.log(`Temporary WAV file deleted: ${tempWavPath}`);
@@ -132,9 +128,6 @@ export class AkawoService {
     }
   }
 
-  /**
-   * Converts a webm audio buffer to a wav audio buffer using ffmpeg.
-   */
   private convertWebmToWav(inputBuffer: Buffer): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const tempInputPath = path.join(os.tmpdir(), `input-${Date.now()}.webm`);
@@ -246,6 +239,7 @@ export class AkawoService {
       'collected',
       'sold',
       'ta',
+      'kú',
     ];
 
     if (queryKeywords.some((kw) => lowerText.includes(kw))) {
@@ -336,9 +330,7 @@ export class AkawoService {
       .toLowerCase()
       .trim()
       .split(/[\s-]+/);
-    let total = 0;
 
-    // Example: "egberun meji" -> [egberun, meji]
     if (
       words.length === 2 &&
       numberMap[words[0]] >= 1000 &&
@@ -347,7 +339,6 @@ export class AkawoService {
       return numberMap[words[0]] * numberMap[words[1]];
     }
 
-    // Simple lookup for single words
     if (words.length === 1 && numberMap[words[0]]) {
       return numberMap[words[0]];
     }
@@ -392,14 +383,24 @@ export class AkawoService {
     return voiceMap[lang] || 'sade';
   }
 
+  /**
+   * Removes diacritical marks from text to make it safe for the Spitch TTS API.
+   */
+  private normalizeTextForTTS(text: string): string {
+    return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+
   private async generateSpeech(
     text: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
   ): Promise<string | null> {
     try {
       const voice = this.getVoiceForLanguage(language);
+      // FIX: Sanitize the text before sending it to the TTS API
+      const sanitizedText = this.normalizeTextForTTS(text);
+
       const ttsResponse = await this.spitch.speech.generate({
-        text,
+        text: sanitizedText,
         language,
         voice,
       });
@@ -409,6 +410,7 @@ export class AkawoService {
         `Spitch TTS API failed for text: "${text}"`,
         error.stack,
       );
+      // Return null instead of throwing an error to make the app more resilient
       return null;
     }
   }
@@ -433,7 +435,6 @@ export class AkawoService {
       ha: 'Babu wanda ke bin ka bashi.',
       en: 'You have no outstanding debts.',
     };
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return messages[lang];
   }
 
