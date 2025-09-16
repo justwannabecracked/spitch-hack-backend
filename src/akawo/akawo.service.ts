@@ -92,12 +92,17 @@ export class AkawoService {
     language: 'ig' | 'yo' | 'ha' | 'en' = 'en',
   ) {
     this.logger.log(`Processing audio file at path: ${tempFilePath}`);
+    let transcribedText: string | null = null;
 
     try {
-      const transcribedText = await this.transcribeAudioWithGemini(
+      transcribedText = await this.transcribeAudioWithGemini(
         tempFilePath,
         language,
       );
+
+      // Clean up the original uploaded file immediately after transcription
+      await fs.unlink(tempFilePath);
+      this.logger.log(`Cleaned up temporary upload file: ${tempFilePath}`);
 
       if (!transcribedText) {
         throw new BadRequestException(
@@ -108,10 +113,6 @@ export class AkawoService {
 
       const intent = this.determineIntent(transcribedText);
       this.logger.log(`Determined Intent: "${intent}"`);
-
-      // After processing, clean up the original uploaded file
-      await fs.unlink(tempFilePath);
-      this.logger.log(`Cleaned up temporary upload file: ${tempFilePath}`);
 
       switch (intent) {
         case 'log_transaction':
@@ -135,13 +136,12 @@ export class AkawoService {
           });
       }
     } catch (error) {
-      // Ensure cleanup happens even if there's an error
+      // FIX: Ensure cleanup happens only once, even on error.
       await fs
         .unlink(tempFilePath)
         .catch((e) =>
-          this.logger.error(
-            `Failed to clean up file on error: ${tempFilePath}`,
-            e,
+          this.logger.warn(
+            `Could not clean up file on error (may already be deleted): ${tempFilePath}`,
           ),
         );
       this.logger.error('Error in main audio processing pipeline', error.stack);
@@ -159,7 +159,6 @@ export class AkawoService {
     this.logger.debug('Transcribing audio with Gemini from file path...');
     const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-    // Convert the original webm file to a wav file for Gemini
     const wavFilePath = await this.convertWebmToWav(filePath);
 
     const prompt = `Transcribe the following audio recording. The primary language is ${language}.`;
@@ -179,18 +178,24 @@ export class AkawoService {
       this.logger.error('Error during Gemini transcription', error);
       return null;
     } finally {
-      // Clean up the converted wav file
       await fs
         .unlink(wavFilePath)
         .catch((e) => this.logger.error('Failed to clean up WAV file', e));
     }
   }
 
+  /**
+   * THE FIX: This function now creates a high-quality, standardized WAV file.
+   */
   private convertWebmToWav(inputPath: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const outputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
       ffmpeg(inputPath)
         .toFormat('wav')
+        .audioCodec('pcm_s16le') // Standard uncompressed audio codec
+        .audioBitrate('128k') // Good quality bitrate
+        .audioChannels(1) // Mono audio for voice commands
+        .audioFrequency(16000) // Optimal sample rate for speech recognition
         .on('error', (err) => {
           this.logger.error('FFmpeg error:', err.message);
           reject(
@@ -314,6 +319,8 @@ export class AkawoService {
     }
   }
 
+  // --- All other helper functions remain the same ---
+  // ... (handleDebtorQuery, getTransactionsForUser, etc.)
   private async handleDebtorQuery(
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
