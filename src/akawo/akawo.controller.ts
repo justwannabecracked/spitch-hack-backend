@@ -24,14 +24,14 @@ export class AkawoController {
   @Post('process-audio')
   @UseInterceptors(FileInterceptor('audio'))
   async processAudio(
-    // The @UploadedFile decorator now provides a file object with a path property.
+    // The @UploadedFile decorator now reliably provides a file object
+    // with a 'path' property pointing to the fully saved file on disk.
     @UploadedFile() file: Express.Multer.File,
     @Request() req: { user: { sub: string } },
     @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en' },
   ) {
-    // A crucial check to ensure a file was actually uploaded.
     if (!file) {
-      throw new BadRequestException('No audio file uploaded.');
+      throw new BadRequestException('No audio file was uploaded.');
     }
 
     this.logger.log(
@@ -39,7 +39,7 @@ export class AkawoController {
     );
 
     const userId = req.user.sub;
-    // We now pass the file path to the service instead of the in-memory buffer.
+    // We now pass the stable file path to the service.
     return this.akawoService.processAudioCommand(
       file.path,
       userId,

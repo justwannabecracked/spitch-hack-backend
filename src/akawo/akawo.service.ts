@@ -314,7 +314,6 @@ export class AkawoService {
     }
   }
 
-  // --- All other helper functions remain the same ---
   private async handleDebtorQuery(
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
