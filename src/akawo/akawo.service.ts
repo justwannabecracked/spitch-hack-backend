@@ -34,7 +34,13 @@ type ParsedTransaction = {
   amount: number;
   type: 'debt' | 'income';
 };
-type Intent = 'log_transaction' | 'query_debtors' | 'unknown';
+// At the top of the file
+type Intent =
+  | 'log_transaction'
+  | 'query_debtors'
+  | 'query_total_income'
+  | 'query_total_debt'
+  | 'unknown';
 
 type SpitchVoice =
   | 'sade'
@@ -123,6 +129,20 @@ export class AkawoService {
           );
         case 'query_debtors':
           return this.handleDebtorQuery(userId, language);
+        case 'query_total_income':
+          return this.handleCalculationQuery(
+            transcribedText,
+            userId,
+            language,
+            'income',
+          );
+        case 'query_total_debt':
+          return this.handleCalculationQuery(
+            transcribedText,
+            userId,
+            language,
+            'debt',
+          );
         default:
           const errorText = this.generateErrorMessage(language);
           const errorAudio = await this.generateSpeech(
@@ -294,19 +314,36 @@ export class AkawoService {
       model: 'gemini-1.5-flash',
       safetySettings,
     });
+    // in parseIntelligentV4 function
 
     const systemPrompt = `
-      You are an expert accounting assistant for a Nigerian market trader named Akawo.
-      Your task is to analyze transcribed voice commands in Nigerian languages (English, Yoruba, Igbo, Hausa) and extract transaction details with precision.
-      Keywords for PAID: "san", "sanwo", "paid", "kwụrụ", "biya".
-      Keywords for DEBT/OWED: "ku", "kú", "owes", "remaining", "ji", "karbi".
-      RULES:
-      - A sentence can contain both an income and a debt.
-      - If no customer is found, use "Oníbàárà". If no details are found, use "Ọjà".
-      - Convert spoken numbers (e.g., "ẹgbẹ̀rún méjì") into digits (e.g., 2000).
-      - Your response MUST be a valid JSON array of objects with keys: "customer", "details", "amount", and "type" ("income" or "debt").
-      - If no valid transaction is found, return an empty array: [].
-    `;
+  You are an expert accounting assistant for a Nigerian market trader named Akawo.
+  Your task is to analyze transcribed voice commands in Nigerian languages (English, Yoruba, Igbo, Hausa) and extract transaction details with extreme precision.
+
+  Keywords for INCOME/PAID: "san", "sanwo", "paid", "kwụrụ", "biya", "collected", "fun mi".
+  Keywords for DEBT/OWED: "ku", "kú", "owes", "remaining", "ji", "karbi", "gba", "took".
+
+  RULES:
+  - A single sentence can contain both an income and a debt transaction for the same person.
+  - Your response MUST be a valid JSON array of objects with keys: "customer", "details", "amount", and "type" ("income" or "debt").
+  - If no specific customer name is mentioned, use "Oníbàárà" as the customer.
+  - If no specific details are mentioned, use "Ọjà" (meaning 'goods').
+  - Accurately convert spoken numbers into digits (e.g., "ẹgbẹ̀rún méjì" -> 2000, "puku abụọ" -> 2000).
+  - If no valid transaction can be extracted, you MUST return an empty array: [].
+
+  EXAMPLES:
+  - English Input: "Ada bought two bags of rice she paid 2,000 and is owing 100,000."
+  - English Output: [{"customer":"Ada","details":"Sale of two bags of rice","amount":2000,"type":"income"},{"customer":"Ada","details":"Remaining balance from rice sale","amount":100000,"type":"debt"}]
+
+  - Yoruba Input: "Femi san ẹgbẹ̀rún méjì fún garri, ó ku ẹgbẹ̀rún kan."
+  - Yoruba Output: [{"customer":"Femi","details":"garri","amount":2000,"type":"income"},{"customer":"Femi","details":"garri","amount":1000,"type":"debt"}]
+
+  - Igbo Input: "Obi kwụrụ puku abụọ maka akpụ, jide puku atọ."
+  - Igbo Output: [{"customer":"Obi","details":"akpụ","amount":2000,"type":"income"},{"customer":"Obi","details":"akpụ","amount":3000,"type":"debt"}]
+  
+  - Hausa Input: "Aisha ta biya dubu biyu na shinkafa, saura dubu daya."
+  - Hausa Output: [{"customer":"Aisha","details":"shinkafa","amount":2000,"type":"income"},{"customer":"Aisha","details":"shinkafa","amount":1000,"type":"debt"}]
+`;
 
     try {
       const result = await model.generateContent([systemPrompt, text]);
@@ -365,9 +402,34 @@ export class AkawoService {
       .exec();
   }
 
+  // Replace your existing determineIntent function
   private determineIntent(text: string): Intent {
     const lowerText = this.normalizeTextForParsing(text);
-    const queryKeywords = [
+
+    // Total Income Keywords
+    const incomeQueryKeywords = [
+      'total income',
+      'pàápàá owó tó wọlé',
+      'ego ole m nwetara',
+      'kudin shiga gaba daya',
+    ];
+    if (incomeQueryKeywords.some((kw) => lowerText.includes(kw))) {
+      return 'query_total_income';
+    }
+
+    // Total Debt Keywords
+    const debtQueryKeywords = [
+      'total debt',
+      'pàápàá gbèsè',
+      'ụgwọ ole ka a ji m',
+      'bashin gaba daya',
+    ];
+    if (debtQueryKeywords.some((kw) => lowerText.includes(kw))) {
+      return 'query_total_debt';
+    }
+
+    // Existing Debtor List Keywords
+    const debtorListKeywords = [
       'tani',
       'who',
       'list',
@@ -376,6 +438,11 @@ export class AkawoService {
       'ndi ji',
       'su wanene',
     ];
+    if (debtorListKeywords.some((kw) => lowerText.includes(kw))) {
+      return 'query_debtors';
+    }
+
+    // Existing Transaction Logging Keywords
     const transactionKeywords = [
       'gba',
       'ji',
@@ -392,13 +459,10 @@ export class AkawoService {
       'biya',
       'karbi',
     ];
-
-    if (queryKeywords.some((kw) => lowerText.includes(kw))) {
-      return 'query_debtors';
-    }
     if (transactionKeywords.some((kw) => lowerText.includes(kw))) {
       return 'log_transaction';
     }
+
     return 'unknown';
   }
 
@@ -583,5 +647,103 @@ export class AkawoService {
       default:
         return 'Sorry, I did not understand. Please state the customer, amount, and reason, or ask your question.';
     }
+  }
+
+  // Add this new function inside the AkawoService class
+
+  private async handleCalculationQuery(
+    text: string,
+    userId: string,
+    language: 'ig' | 'yo' | 'ha' | 'en',
+    type: 'income' | 'debt',
+  ) {
+    const transactions = await this.getTransactionsForUser(userId);
+
+    // Check if a specific customer is mentioned in the query
+    let customerName: string | null = null;
+    const potentialCustomer = transactions.find((tx) =>
+      text.toLowerCase().includes(tx.customer.toLowerCase()),
+    );
+    if (potentialCustomer) {
+      customerName = potentialCustomer.customer;
+    }
+
+    const relevantTransactions = transactions.filter((t) => {
+      const typeMatch = t.type === type;
+      const customerMatch = !customerName || t.customer === customerName;
+      return typeMatch && customerMatch;
+    });
+
+    const totalAmount = relevantTransactions.reduce(
+      (sum, t) => sum + t.amount,
+      0,
+    );
+
+    const responseText = this.generateCalculationResponse(
+      totalAmount,
+      type,
+      language,
+      customerName,
+    );
+
+    const audioContent = await this.generateSpeech(
+      responseText,
+      language,
+      userId,
+    );
+
+    return {
+      type: 'query_response',
+      confirmationText: responseText,
+      audioContent,
+    };
+  }
+
+  // Add this new function as well
+
+  private generateCalculationResponse(
+    amount: number,
+    type: 'income' | 'debt',
+    lang: 'ig' | 'yo' | 'ha' | 'en',
+    customerName?: string | null,
+  ): string {
+    const formattedAmount = `₦${amount.toLocaleString()}`;
+
+    const messages = {
+      yo: {
+        income: customerName
+          ? `Owó tó wọlé látọ̀dọ̀ ${customerName} jẹ́ ${formattedAmount}.`
+          : `Pàápàá owó tó wọlé jẹ́ ${formattedAmount}.`,
+        debt: customerName
+          ? `Gbèsè tí ${customerName} jẹ́ ọ́ jẹ́ ${formattedAmount}.`
+          : `Pàápàá gbèsè tí wọ́n jẹ́ ọ́ jẹ́ ${formattedAmount}.`,
+      },
+      ig: {
+        income: customerName
+          ? `Ego i nwetara n'aka ${customerName} bụ ${formattedAmount}.`
+          : `Mgbakọta ego i nwetara bụ ${formattedAmount}.`,
+        debt: customerName
+          ? `Ụgwọ ${customerName} ji gị bụ ${formattedAmount}.`
+          : `Mgbakọta ụgwọ a ji gị bụ ${formattedAmount}.`,
+      },
+      ha: {
+        income: customerName
+          ? `Kudin da ka samu daga ${customerName} shine ${formattedAmount}.`
+          : `Jimlar kudin da ka samu shine ${formattedAmount}.`,
+        debt: customerName
+          ? `Bashin da ${customerName} ke bin ka shine ${formattedAmount}.`
+          : `Jimlar bashin da ake bin ka shine ${formattedAmount}.`,
+      },
+      en: {
+        income: customerName
+          ? `Your total income from ${customerName} is ${formattedAmount}.`
+          : `Your total income is ${formattedAmount}.`,
+        debt: customerName
+          ? `The total debt owed by ${customerName} is ${formattedAmount}.`
+          : `Your total outstanding debt is ${formattedAmount}.`,
+      },
+    };
+
+    return messages[lang][type];
   }
 }
