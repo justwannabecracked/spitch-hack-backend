@@ -10,7 +10,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
-// Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
 import axios from 'axios';
 import * as path from 'path';
@@ -117,8 +116,8 @@ export class AkawoService {
       }
       this.logger.log(`Gemini Transcribed Text: "${transcribedText}"`);
 
-      const intent = this.determineIntent(transcribedText);
-      this.logger.log(`Determined Intent: "${intent}"`);
+      const intent = await this.determineIntentWithLLM(transcribedText);
+      this.logger.log(`Determined Intent (AI): "${intent}"`);
 
       switch (intent) {
         case 'log_transaction':
@@ -144,15 +143,15 @@ export class AkawoService {
             'debt',
           );
         default:
-          const errorText = this.generateErrorMessage(language);
-          const errorAudio = await this.generateSpeech(
-            errorText,
+          const infoText = this.generateInfoMessage(language);
+          const infoAudio = await this.generateSpeech(
+            infoText,
             language,
             userId,
           );
           throw new BadRequestException({
-            message: errorText,
-            audioContent: errorAudio,
+            message: infoText,
+            audioContent: infoAudio,
           });
       }
     } catch (error) {
@@ -316,33 +315,62 @@ export class AkawoService {
     });
     // in parseIntelligentV4 function
 
+    // in parseIntelligentV4 function
+
+    // in parseIntelligentV4 function
+
     const systemPrompt = `
-  You are an expert accounting assistant for a Nigerian market trader named Akawo.
-  Your task is to analyze transcribed voice commands in Nigerian languages (English, Yoruba, Igbo, Hausa) and extract transaction details with extreme precision.
+You are Akawo, an expert financial assistant for a Nigerian market trader. Your single most important job is to listen to voice commands and convert them into perfectly structured JSON data with extreme precision. You must understand English, Yoruba, Igbo, and Hausa fluently.
 
-  Keywords for INCOME/PAID: "san", "sanwo", "paid", "kwụrụ", "biya", "collected", "fun mi".
-  Keywords for DEBT/OWED: "ku", "kú", "owes", "remaining", "ji", "karbi", "gba", "took".
+### CORE DIRECTIVES
+1.  **Output Format**: Your response MUST be a valid JSON array of objects. Each object MUST contain these keys: "customer", "details", "amount", "type" (either "income" or "debt").
+2.  **No Hallucination**: NEVER invent information. If a monetary amount is not mentioned for a specific action, that action is NOT a valid financial transaction and must be ignored.
+3.  **Empty Array on Failure**: If you analyze the text and find no valid, complete financial transactions, you MUST return an empty array: [].
 
-  RULES:
-  - A single sentence can contain both an income and a debt transaction for the same person.
-  - Your response MUST be a valid JSON array of objects with keys: "customer", "details", "amount", and "type" ("income" or "debt").
-  - If no specific customer name is mentioned, use "Oníbàárà" as the customer.
-  - If no specific details are mentioned, use "Ọjà" (meaning 'goods').
-  - Accurately convert spoken numbers into digits (e.g., "ẹgbẹ̀rún méjì" -> 2000, "puku abụọ" -> 2000).
-  - If no valid transaction can be extracted, you MUST return an empty array: [].
+### LOGIC & RULES
+- **Multi-Transaction Sentences**: A single command can contain multiple transactions (e.g., a payment and a remaining debt). You must extract all of them.
+- **Pronoun Resolution**: This is a critical rule. Pronouns like 'o', 'ó' (Yoruba), 'ọ' (Igbo), 'ya', 'ta' (Hausa), or 'he/she' (English) MUST refer to the most recently mentioned customer in the command. If a customer's name has been mentioned, do not default to "Oníbàárà" for subsequent actions by that person.
+- **Customer Identification**: Prioritize finding a real customer name. ONLY use the default "Oníbàárà" if no name is mentioned anywhere in the command.
+- **Details Extraction**: For the "details" field, be descriptive. Use the item mentioned (e.g., "shinkafa", "garri"). If an item was mentioned earlier for the same customer, use that as context for a remaining balance (e.g., "Remaining balance for shinkafa"). If no item is mentioned at all, use the default "Ọjà" (meaning 'goods').
+- **Keyword Bank**:
+    - **INCOME/PAID**: "san", "sanwo", "paid", "kwụrụ", "biya", "collected", "fun mi", "sells", "ta".
+    - **DEBT/OWED**: "ku", "kú", "owes", "remaining", "ji", "karbi", "gba", "took", "bashi", "ụgwọ".
+- **Number Conversion**: Accurately convert spoken numbers from all languages into digits (e.g., "ẹgbẹ̀rún méjì" -> 2000, "puku abụọ" -> 2000, "dubu biyu" -> 2000).
 
-  EXAMPLES:
-  - English Input: "Ada bought two bags of rice she paid 2,000 and is owing 100,000."
-  - English Output: [{"customer":"Ada","details":"Sale of two bags of rice","amount":2000,"type":"income"},{"customer":"Ada","details":"Remaining balance from rice sale","amount":100000,"type":"debt"}]
+### THINKING PROCESS
+Follow these steps to ensure accuracy:
+1.  Break the user's command down into individual actions or clauses.
+2.  Scan the entire command for any proper names to identify the primary customer(s).
+3.  For each action, identify the item, the amount, and the type (income or debt) using the keyword bank.
+4.  Link each action to a customer. If a pronoun is used, link it to the last customer identified.
+5.  Strictly filter out any actions that are incomplete (e.g., a sale with no price).
+6.  Construct the final JSON array from the valid, complete transactions.
 
-  - Yoruba Input: "Femi san ẹgbẹ̀rún méjì fún garri, ó ku ẹgbẹ̀rún kan."
-  - Yoruba Output: [{"customer":"Femi","details":"garri","amount":2000,"type":"income"},{"customer":"Femi","details":"garri","amount":1000,"type":"debt"}]
+### EXAMPLES
 
-  - Igbo Input: "Obi kwụrụ puku abụọ maka akpụ, jide puku atọ."
-  - Igbo Output: [{"customer":"Obi","details":"akpụ","amount":2000,"type":"income"},{"customer":"Obi","details":"akpụ","amount":3000,"type":"debt"}]
-  
-  - Hausa Input: "Aisha ta biya dubu biyu na shinkafa, saura dubu daya."
-  - Hausa Output: [{"customer":"Aisha","details":"shinkafa","amount":2000,"type":"income"},{"customer":"Aisha","details":"shinkafa","amount":1000,"type":"debt"}]
+**--- English ---**
+- **Input**: "Ada bought two bags of rice she paid 2,000 and is owing 100,000."
+- **Output**: [{"customer":"Ada","details":"Sale of two bags of rice","amount":2000,"type":"income"},{"customer":"Ada","details":"Remaining balance from rice sale","amount":100000,"type":"debt"}]
+
+**--- Yoruba (demonstrating pronoun rule) ---**
+- **Input**: "Mo ta garri fun Femi, o san ẹgbẹ̀rún méjì, ó sì ku ẹgbẹ̀rún kan."
+- **Output**: [{"customer":"Femi","details":"garri","amount":2000,"type":"income"},{"customer":"Femi","details":"Remaining balance for garri","amount":1000,"type":"debt"}]
+
+**--- Igbo (demonstrating pronoun rule) ---**
+- **Input**: "M rere akpụ nye Obi, ọ kwụrụ puku abụọ, ma jide puku atọ."
+- **Output**: [{"customer":"Obi","details":"akpụ","amount":2000,"type":"income"},{"customer":"Obi","details":"Remaining balance for akpụ","amount":3000,"type":"debt"}]
+
+**--- Hausa (demonstrating pronoun rule) ---**
+- **Input**: "Na sayar da shinkafa ga Aisha, ta biya dubu biyu, kuma saura dubu daya."
+- **Output**: [{"customer":"Aisha","details":"shinkafa","amount":2000,"type":"income"},{"customer":"Aisha","details":"Remaining balance for shinkafa","amount":1000,"type":"debt"}]
+
+**--- Invalid Input (Missing Amount) ---**
+- **Input**: "I sold three red palm oils to Emma"
+- **Output**: []
+
+**--- Unrelated Input ---**
+- **Input**: "How is the market today?"
+- **Output**: []
 `;
 
     try {
@@ -400,81 +428,6 @@ export class AkawoService {
       .find({ owner: userId })
       .sort({ createdAt: -1 })
       .exec();
-  }
-
-  // Replace your existing determineIntent function
-  private determineIntent(text: string): Intent {
-    const lowerText = this.normalizeTextForParsing(text);
-
-    // Total Income Keywords
-    const incomeQueryKeywords = [
-      'total income',
-      'pàápàá owó tó wọlé',
-      'ego ole m nwetara',
-      'kudin shiga gaba daya',
-    ];
-    if (incomeQueryKeywords.some((kw) => lowerText.includes(kw))) {
-      return 'query_total_income';
-    }
-
-    // Total Debt Keywords
-    const debtQueryKeywords = [
-      'total debt',
-      'pàápàá gbèsè',
-      'ụgwọ ole ka a ji m',
-      'bashin gaba daya',
-    ];
-    if (debtQueryKeywords.some((kw) => lowerText.includes(kw))) {
-      return 'query_total_debt';
-    }
-
-    // Existing Debtor List Keywords
-    const debtorListKeywords = [
-      'tani',
-      'who',
-      'list',
-      'show me',
-      'awon to je',
-      'ndi ji',
-      'su wanene',
-    ];
-    if (debtorListKeywords.some((kw) => lowerText.includes(kw))) {
-      return 'query_debtors';
-    }
-
-    // Existing Transaction Logging Keywords
-    const transactionKeywords = [
-      'gba',
-      'ji',
-      'owes',
-      'san',
-      'sanwo',
-      'kwuru',
-      'paid',
-      'collected',
-      'sold',
-      'ta',
-      'ku',
-      'remaining',
-      'biya',
-      'karbi',
-    ];
-    if (transactionKeywords.some((kw) => lowerText.includes(kw))) {
-      return 'log_transaction';
-    }
-
-    return 'unknown';
-  }
-
-  private capitalize(s: string): string {
-    return s.charAt(0).toUpperCase() + s.slice(1);
-  }
-
-  private normalizeTextForParsing(text: string): string {
-    return text
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase();
   }
 
   private getVoiceForLanguage(
@@ -745,5 +698,64 @@ export class AkawoService {
     };
 
     return messages[lang][type];
+  }
+
+  // Add this new function inside the AkawoService class
+  private async determineIntentWithLLM(text: string): Promise<Intent> {
+    this.logger.debug(`Determining intent with LLM for: "${text}"`);
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    const systemPrompt = `
+    You are an intent classifier. Your task is to analyze the user's text and determine their goal.
+    You MUST respond with ONLY ONE of the following valid intent strings:
+    - "log_transaction": If the user is stating a sale, payment, debt, or any financial record.
+    - "query_debtors": If the user is asking WHO owes them money or for a list of debtors.
+    - "query_total_income": If the user is asking for their TOTAL income.
+    - "query_total_debt": If the user is asking for their TOTAL debt.
+    - "unknown": If the intent is unclear or does not fit any of the above categories.
+
+    Examples:
+    - User text: "Ada paid 2000 for rice" -> "log_transaction"
+    - User text: "Ta lo je mi lowo?" -> "query_debtors"
+    - User text: "Show me the list of people owing me" -> "query_debtors"
+    - User text: "Kí ni gbogbo owó tó wọlé?" -> "query_total_income"
+    - User text: "What is my total debt?" -> "query_total_debt"
+  `;
+
+    try {
+      const result = await model.generateContent([systemPrompt, text]);
+      const intent = result.response.text().trim() as Intent;
+
+      // Validate the response from the LLM
+      const validIntents: Intent[] = [
+        'log_transaction',
+        'query_debtors',
+        'query_total_income',
+        'query_total_debt',
+        'unknown',
+      ];
+      if (validIntents.includes(intent)) {
+        return intent;
+      }
+      this.logger.warn(
+        `LLM returned an invalid intent: "${intent}". Falling back to unknown.`,
+      );
+      return 'unknown';
+    } catch (error) {
+      this.logger.error('Error determining intent with LLM', error);
+      return 'unknown'; // Fallback in case of an API error
+    }
+  }
+
+  // Add this new function inside the AkawoService class
+
+  private generateInfoMessage(lang: 'ig' | 'yo' | 'ha' | 'en'): string {
+    const messages = {
+      yo: 'Èmi ni Akawọ, olùrànlọ́wọ́ yín fún ìṣirò owó. Ẹ lè sọ fún mi nípa ọjà tẹ́ ẹ tà àti gbèsè, tàbí kí ẹ béèrè àwọn tó jẹ yín lówó àti gbogbo owó tó wọlé.',
+      ig: 'Abụ m Akawo, onye enyemaka ego gị. Ị nwere ike ịgwa m gbasara ahịa na ụgwọ gị, ma ọ bụ jụọ m maka ndị ji gị ụgwọ na ego ole i nwetara.',
+      ha: 'Ni ne Akawo, mataimakin ku na kuɗi. Kuna iya gaya mani game da tallace-tallace da basussuka, ko ku tambaye ni jerin sunayen masu bin ku bashi da jimlar kuɗin da aka samu.',
+      en: 'I am Akawo, your personal finance assistant. You can tell me about your sales and debts, or ask me to list your debtors and total income or debt.',
+    };
+    return messages[lang];
   }
 }
