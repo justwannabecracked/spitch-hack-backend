@@ -199,9 +199,6 @@ export class AkawoService {
     }
   }
 
-  /**
-   * THE FIX: This function now creates a high-quality, standardized WAV file.
-   */
   private convertWebmToWav(inputPath: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const outputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
