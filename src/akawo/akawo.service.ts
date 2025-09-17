@@ -12,6 +12,7 @@ import { Transaction } from './schemas/transaction.schema';
 import Spitch from 'spitch';
 // Node.js built-in modules for handling files and paths
 import * as fs from 'fs/promises';
+import axios from 'axios';
 import * as path from 'path';
 import * as os from 'os';
 import ffmpeg = require('fluent-ffmpeg');
@@ -64,6 +65,8 @@ export class AkawoService {
   private spitch: Spitch;
   private readonly logger = new Logger(AkawoService.name);
   private genAI: GoogleGenerativeAI;
+  private whisperApiUrl =
+    'https://api-inference.huggingface.co/models/openai/whisper-large-v3';
 
   constructor(
     private configService: ConfigService,
@@ -95,10 +98,7 @@ export class AkawoService {
     let transcribedText: string | null = null;
 
     try {
-      transcribedText = await this.transcribeAudioWithGemini(
-        tempFilePath,
-        language,
-      );
+      transcribedText = await this.transcribeAudioWithWhisper(tempFilePath);
 
       // Clean up the original uploaded file immediately after transcription
       await fs.unlink(tempFilePath);
@@ -152,32 +152,46 @@ export class AkawoService {
     }
   }
 
-  private async transcribeAudioWithGemini(
+  private async transcribeAudioWithWhisper(
     filePath: string,
-    language: string,
   ): Promise<string | null> {
-    this.logger.debug('Transcribing audio with Gemini from file path...');
-    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    this.logger.debug('Transcribing audio with Whisper on Hugging Face...');
 
+    const hfApiKey = this.configService.get<string>('HUGGINGFACE_API_KEY');
+    if (!hfApiKey) {
+      this.logger.error('HUGGINGFACE_API_KEY is not configured.');
+      throw new InternalServerErrorException(
+        'Transcription service is not configured.',
+      );
+    }
+
+    // Convert the input audio to a high-quality WAV format first
     const wavFilePath = await this.convertWebmToWav(filePath);
-
-    const prompt = `Transcribe the following audio recording. The primary language is ${language}.`;
 
     try {
       const audioBuffer = await fs.readFile(wavFilePath);
-      const audioPart = {
-        inlineData: {
-          data: audioBuffer.toString('base64'),
-          mimeType: 'audio/wav',
-        },
-      };
 
-      const result = await model.generateContent([prompt, audioPart]);
-      return result.response.text().trim();
+      const response = await axios.post(this.whisperApiUrl, audioBuffer, {
+        headers: {
+          Authorization: `Bearer ${hfApiKey}`,
+          'Content-Type': 'audio/wav',
+        },
+      });
+
+      if (response.data && response.data.text) {
+        const transcribedText = response.data.text.trim();
+        this.logger.log(`Whisper Transcribed Text: "${transcribedText}"`);
+        return transcribedText;
+      }
+      return null;
     } catch (error) {
-      this.logger.error('Error during Gemini transcription', error);
+      this.logger.error(
+        'Error during Whisper transcription',
+        error.response?.data || error.message,
+      );
       return null;
     } finally {
+      // Clean up the temporary WAV file
       await fs
         .unlink(wavFilePath)
         .catch((e) => this.logger.error('Failed to clean up WAV file', e));
@@ -477,9 +491,11 @@ export class AkawoService {
 
   private generateConfirmationMessageV2(
     transactions: (Transaction & { _id: any })[],
-    lang: string,
+    lang: 'ig' | 'yo' | 'ha' | 'en',
   ): string {
     if (transactions.length === 0) return this.generateErrorMessage(lang);
+
+    // If there's only one transaction, use the existing detailed message function
     if (transactions.length === 1) {
       return this.generateConfirmationMessage(
         transactions[0] as ParsedTransaction,
@@ -487,16 +503,50 @@ export class AkawoService {
       );
     }
 
+    // Language-specific terms
+    const terms = {
+      yo: {
+        debt: 'gbèsè',
+        income: 'ìsanwó',
+        and: 'àti',
+        for: 'fún',
+        preamble: 'O dáa. Mo ti kọ sílẹ̀:',
+      },
+      ig: {
+        debt: 'ụgwọ',
+        income: 'ịkwụ ụgwọ',
+        and: 'na',
+        for: 'maka',
+        preamble: 'Ọ dị mma. Edeela m:',
+      },
+      ha: {
+        debt: 'bashi',
+        income: 'biya',
+        and: 'da',
+        for: 'don',
+        preamble: 'Na gode. Na rubuta:',
+      },
+      en: {
+        debt: 'a debt of',
+        income: 'a payment of',
+        and: 'and',
+        for: 'for',
+        preamble: "Got it. I've logged:",
+      },
+    };
+
+    const selectedTerms = terms[lang];
+
     const summary = transactions
       .map(
         (tx) =>
-          `${tx.type === 'debt' ? 'gbèsè' : 'ìsanwó'} ₦${tx.amount.toLocaleString()}`,
+          `${tx.type === 'debt' ? selectedTerms.debt : selectedTerms.income} ₦${tx.amount.toLocaleString()}`,
       )
-      .join(' àti ');
+      .join(` ${selectedTerms.and} `);
 
     const customer = transactions[0].customer;
 
-    return `O dáa. Mo ti kọ sílẹ̀: ${summary} fún ${customer}.`;
+    return `${selectedTerms.preamble} ${summary} ${selectedTerms.for} ${customer}.`;
   }
 
   private generateConfirmationMessage(
