@@ -175,6 +175,7 @@ export class AkawoService {
         headers: {
           Authorization: `Bearer ${hfApiKey}`,
           'Content-Type': 'audio/wav',
+          Accept: 'application/json',
         },
       });
 
