@@ -496,10 +496,6 @@ Follow these steps to ensure accuracy:
     return voices[index];
   }
 
-  private normalizeTextForTTS(text: string): string {
-    return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
-
   private async generateSpeech(
     text: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
@@ -507,13 +503,13 @@ Follow these steps to ensure accuracy:
   ): Promise<string | null> {
     try {
       const voice = this.getVoiceForLanguage(language, userId);
-      const sanitizedText = this.normalizeTextForTTS(text);
 
       const ttsResponse = await this.spitch.speech.generate({
-        text: sanitizedText,
+        text: text,
         language,
         voice,
       });
+
       return Buffer.from(await ttsResponse.arrayBuffer()).toString('base64');
     } catch (error) {
       this.logger.error(
