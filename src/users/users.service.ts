@@ -19,11 +19,13 @@ export class UsersService {
     username: string,
     email: string,
     password_hash: string,
+    image?: string,
   ): Promise<User> {
     const newUser = new this.userModel({
       username,
       email: email.toLowerCase(),
       password_hash,
+      image,
     });
     return newUser.save();
   }

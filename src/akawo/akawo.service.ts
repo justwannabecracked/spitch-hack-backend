@@ -21,8 +21,9 @@ import {
   HarmCategory,
   HarmBlockThreshold,
 } from '@google/generative-ai';
+import { NotFoundException } from '@nestjs/common';
+import { startOfDay, endOfDay, parseISO } from 'date-fns';
 
-// Polyfill for the global File object, required by the Spitch SDK in Node.js < 20
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = File as any;
 }
@@ -33,13 +34,12 @@ type ParsedTransaction = {
   amount: number;
   type: 'debt' | 'income';
 };
-// At the top of the file
 type Intent =
   | 'log_transaction'
   | 'query_debtors'
   | 'query_total_income'
   | 'query_total_debt'
-  | 'unknown';
+  | 'ask_capabilities';
 
 type SpitchVoice =
   | 'sade'
@@ -105,7 +105,6 @@ export class AkawoService {
     try {
       transcribedText = await this.transcribeAudioWithWhisper(tempFilePath);
 
-      // Clean up the original uploaded file immediately after transcription
       await fs.unlink(tempFilePath);
       this.logger.log(`Cleaned up temporary upload file: ${tempFilePath}`);
 
@@ -142,7 +141,9 @@ export class AkawoService {
             language,
             'debt',
           );
+        case 'ask_capabilities':
         default:
+          return this.handleCapabilitiesQuery(userId, language);
           const infoText = this.generateInfoMessage(language);
           const infoAudio = await this.generateSpeech(
             infoText,
@@ -155,7 +156,6 @@ export class AkawoService {
           });
       }
     } catch (error) {
-      // FIX: Ensure cleanup happens only once, even on error.
       await fs
         .unlink(tempFilePath)
         .catch((e) =>
@@ -171,6 +171,59 @@ export class AkawoService {
     }
   }
 
+  async deleteSingleTransaction(
+    transactionId: string,
+    userId: string,
+  ): Promise<{ message: string }> {
+    this.logger.log(
+      `Attempting to delete transaction ${transactionId} for user ${userId}`,
+    );
+
+    const result = await this.transactionModel.findOneAndDelete({
+      _id: transactionId,
+      owner: userId,
+    });
+
+    if (!result) {
+      throw new NotFoundException(
+        `Transaction with ID "${transactionId}" not found or you do not have permission to delete it.`,
+      );
+    }
+    return { message: 'Transaction deleted successfully.' };
+  }
+
+  async deleteTransactionsByDate(
+    dateString: string,
+    userId: string,
+  ): Promise<{ message: string; deletedCount: number }> {
+    this.logger.log(
+      `Attempting to delete all transactions on ${dateString} for user ${userId}`,
+    );
+
+    const day = parseISO(dateString);
+    const startDate = startOfDay(day);
+    const endDate = endOfDay(day);
+
+    const result = await this.transactionModel.deleteMany({
+      owner: userId,
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate,
+      },
+    });
+
+    if (result.deletedCount === 0) {
+      this.logger.warn(
+        `No transactions found to delete on ${dateString} for user ${userId}`,
+      );
+    }
+
+    return {
+      message: `Successfully deleted all transactions for ${dateString}.`,
+      deletedCount: result.deletedCount,
+    };
+  }
+
   private async transcribeAudioWithWhisper(
     filePath: string,
   ): Promise<string | null> {
@@ -184,7 +237,6 @@ export class AkawoService {
       );
     }
 
-    // Convert the input audio to a high-quality WAV format first
     const wavFilePath = await this.convertWebmToWav(filePath);
 
     try {
@@ -211,7 +263,6 @@ export class AkawoService {
       );
       return null;
     } finally {
-      // Clean up the temporary WAV file
       await fs
         .unlink(wavFilePath)
         .catch((e) => this.logger.error('Failed to clean up WAV file', e));
@@ -223,10 +274,10 @@ export class AkawoService {
       const outputPath = path.join(os.tmpdir(), `output-${Date.now()}.wav`);
       ffmpeg(inputPath)
         .toFormat('wav')
-        .audioCodec('pcm_s16le') // Standard uncompressed audio codec
-        .audioBitrate('128k') // Good quality bitrate
-        .audioChannels(1) // Mono audio for voice commands
-        .audioFrequency(16000) // Optimal sample rate for speech recognition
+        .audioCodec('pcm_s16le')
+        .audioBitrate('128k')
+        .audioChannels(1)
+        .audioFrequency(16000)
         .on('error', (err) => {
           this.logger.error('FFmpeg error:', err.message);
           reject(
@@ -313,14 +364,8 @@ export class AkawoService {
       model: 'gemini-1.5-flash',
       safetySettings,
     });
-    // in parseIntelligentV4 function
-
-    // in parseIntelligentV4 function
-
-    // in parseIntelligentV4 function
-
     const systemPrompt = `
-You are Akawo, an expert financial assistant for a Nigerian market trader. Your single most important job is to listen to voice commands and convert them into perfectly structured JSON data with extreme precision. You must understand English, Yoruba, Igbo, and Hausa fluently.
+You are akawọ́, an expert financial assistant for a Nigerian market trader. Your single most important job is to listen to voice commands and convert them into perfectly structured JSON data with extreme precision. You must understand English, Yoruba, Igbo, and Hausa fluently.
 
 ### CORE DIRECTIVES
 1.  **Output Format**: Your response MUST be a valid JSON array of objects. Each object MUST contain these keys: "customer", "details", "amount", "type" (either "income" or "debt").
@@ -396,8 +441,6 @@ Follow these steps to ensure accuracy:
     }
   }
 
-  // --- All other helper functions remain the same ---
-  // ... (handleDebtorQuery, getTransactionsForUser, etc.)
   private async handleDebtorQuery(
     userId: string,
     language: 'ig' | 'yo' | 'ha' | 'en',
@@ -510,7 +553,6 @@ Follow these steps to ensure accuracy:
   ): string {
     if (transactions.length === 0) return this.generateErrorMessage(lang);
 
-    // If there's only one transaction, use the existing detailed message function
     if (transactions.length === 1) {
       return this.generateConfirmationMessage(
         transactions[0] as ParsedTransaction,
@@ -518,7 +560,6 @@ Follow these steps to ensure accuracy:
       );
     }
 
-    // Language-specific terms
     const terms = {
       yo: {
         debt: 'gbèsè',
@@ -583,7 +624,7 @@ Follow these steps to ensure accuracy:
           type === 'debt' ? 'karɓi' : 'biya'
         } ₦${amount.toLocaleString()} don ${details}.`;
       default:
-        return `Got it. I've recorded that ${customer} ${
+        return `Alright. I've recorded that ${customer} ${
           type === 'debt' ? 'owes' : 'paid'
         } ₦${amount.toLocaleString()} for ${details}.`;
     }
@@ -602,8 +643,6 @@ Follow these steps to ensure accuracy:
     }
   }
 
-  // Add this new function inside the AkawoService class
-
   private async handleCalculationQuery(
     text: string,
     userId: string,
@@ -612,7 +651,6 @@ Follow these steps to ensure accuracy:
   ) {
     const transactions = await this.getTransactionsForUser(userId);
 
-    // Check if a specific customer is mentioned in the query
     let customerName: string | null = null;
     const potentialCustomer = transactions.find((tx) =>
       text.toLowerCase().includes(tx.customer.toLowerCase()),
@@ -651,8 +689,6 @@ Follow these steps to ensure accuracy:
       audioContent,
     };
   }
-
-  // Add this new function as well
 
   private generateCalculationResponse(
     amount: number,
@@ -700,61 +736,109 @@ Follow these steps to ensure accuracy:
     return messages[lang][type];
   }
 
-  // Add this new function inside the AkawoService class
   private async determineIntentWithLLM(text: string): Promise<Intent> {
     this.logger.debug(`Determining intent with LLM for: "${text}"`);
     const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const systemPrompt = `
-    You are an intent classifier. Your task is to analyze the user's text and determine their goal.
-    You MUST respond with ONLY ONE of the following valid intent strings:
-    - "log_transaction": If the user is stating a sale, payment, debt, or any financial record.
-    - "query_debtors": If the user is asking WHO owes them money or for a list of debtors.
-    - "query_total_income": If the user is asking for their TOTAL income.
-    - "query_total_debt": If the user is asking for their TOTAL debt.
-    - "unknown": If the intent is unclear or does not fit any of the above categories.
+You are a highly precise intent classification AI for "Akawo," a voice assistant for Nigerian traders. Your task is to analyze transcribed user commands in English, Yoruba, Igbo, or Hausa and determine the user's primary goal.
 
-    Examples:
-    - User text: "Ada paid 2000 for rice" -> "log_transaction"
-    - User text: "Ta lo je mi lowo?" -> "query_debtors"
-    - User text: "Show me the list of people owing me" -> "query_debtors"
-    - User text: "Kí ni gbogbo owó tó wọlé?" -> "query_total_income"
-    - User text: "What is my total debt?" -> "query_total_debt"
+### Your Instructions
+1.  Your response MUST be ONLY ONE of the following intent strings: "log_transaction", "query_debtors", "query_total_income", "query_total_debt", or "ask_capabilities".
+2.  Prioritize the main financial question or statement.
+
+### Comprehensive Examples
+
+---
+**INTENT: log_transaction** (User is stating a complex sale with partial payment)
+- User text: "I sold four fufu to Femi, he paid two thousand, five thousand is remaining" -> "log_transaction"
+- User text: "Mota fufu merin fun Femi, o san ẹgbẹ̀rún méjì, ó ku ẹgbẹ̀rún márùn" -> "log_transaction"
+- User text: "Aisha bought rice, she paid 10k and owes 5k" -> "log_transaction"
+- User text: "Na sayar da shinkafa ga Obi, ya biya dubu biyu, saura dubu daya" -> "log_transaction"
+
+---
+**INTENT: query_debtors** (User is asking WHO owes them money)
+- User text: "Show me the list of people who are owing me" -> "query_debtors"
+- User text: "Ta lo je mi lowo?" -> "query_debtors"
+- User text: "Kedu ndị ji m ụgwọ?" -> "query_debtors"
+- User text: "Su wanene ke bina bashi?" -> "query_debtors"
+
+---
+**INTENT: query_total_income** (User is asking for their TOTAL income/credit)
+- User text: "what is my total profit" -> "query_total_income"
+- User text: "Kí ni gbogbo owó tó wọlé?" -> "query_total_income"
+- User text: "Ego ole ka m nwetara na mkpokọta?" -> "query_total_income"
+- User text: "Nawa ne jimlar kudin da na samu?" -> "query_total_income"
+
+---
+**INTENT: query_total_debt** (User is asking for their TOTAL outstanding debt)
+- User text: "how much do people owe me in total" -> "query_total_debt"
+- User text: "Èló ni gbogbo gbèsè tí wọ́n jẹ́ mi?" -> "query_total_debt"
+- User text: "Mgbakọta ụgwọ ole ka a ji m?" -> "query_total_debt"
+- User text: "Nawa ne jimlar bashin da ake bina?" -> "query_total_debt"
+
+---
+**INTENT: ask_capabilities** (The request is unrelated, a greeting, or a general question)
+- User text: "how is the market today" -> "ask_capabilities"
+- User text: "E kaasan" -> "ask_capabilities"
+- User text: "what can you do for me?" -> "ask_capabilities"
+- User text: "Na gode" -> "ask_capabilities"
   `;
 
     try {
       const result = await model.generateContent([systemPrompt, text]);
       const intent = result.response.text().trim() as Intent;
-
-      // Validate the response from the LLM
       const validIntents: Intent[] = [
         'log_transaction',
         'query_debtors',
         'query_total_income',
         'query_total_debt',
-        'unknown',
+        'ask_capabilities',
       ];
       if (validIntents.includes(intent)) {
         return intent;
       }
       this.logger.warn(
-        `LLM returned an invalid intent: "${intent}". Falling back to unknown.`,
+        `LLM returned an invalid intent: "${intent}". Falling back.`,
       );
-      return 'unknown';
+      return 'ask_capabilities';
     } catch (error) {
       this.logger.error('Error determining intent with LLM', error);
-      return 'unknown'; // Fallback in case of an API error
+      return 'ask_capabilities';
     }
   }
 
-  // Add this new function inside the AkawoService class
+  private async handleCapabilitiesQuery(
+    userId: string,
+    language: 'ig' | 'yo' | 'ha' | 'en',
+  ) {
+    const greetings = {
+      en: 'Hello! I am akawọ́, your voice assistant for logging sales and tracking debts. How can I help you today?',
+      yo: 'E ku asiko yi! Èmi ni akawọ́, olùrànlọ́wọ́ yín fún ìṣirò owó. Báwo ni mo ṣe lè ràn yín lọ́wọ́ lónìí?',
+      ig: 'Ndeewo! Abụ m akawọ́, onye enyemaka gị maka idekọ ahịa na ụgwọ. Kedu ka m ga-esi nyere gị aka taa?',
+      ha: 'Sannu! Ni ne akawọ́, mataimakin ka na murya don rubuta tallace-tallace da bin diddigin basusuka. Yaya zan iya taimaka maka a yau?',
+    };
+
+    const responseText = greetings[language];
+    const audioContent = await this.generateSpeech(
+      responseText,
+      language,
+      userId,
+    );
+
+    return {
+      type: 'info_response',
+      confirmationText: responseText,
+      audioContent,
+    };
+  }
 
   private generateInfoMessage(lang: 'ig' | 'yo' | 'ha' | 'en'): string {
     const messages = {
-      yo: 'Èmi ni Akawọ, olùrànlọ́wọ́ yín fún ìṣirò owó. Ẹ lè sọ fún mi nípa ọjà tẹ́ ẹ tà àti gbèsè, tàbí kí ẹ béèrè àwọn tó jẹ yín lówó àti gbogbo owó tó wọlé.',
-      ig: 'Abụ m Akawo, onye enyemaka ego gị. Ị nwere ike ịgwa m gbasara ahịa na ụgwọ gị, ma ọ bụ jụọ m maka ndị ji gị ụgwọ na ego ole i nwetara.',
-      ha: 'Ni ne Akawo, mataimakin ku na kuɗi. Kuna iya gaya mani game da tallace-tallace da basussuka, ko ku tambaye ni jerin sunayen masu bin ku bashi da jimlar kuɗin da aka samu.',
-      en: 'I am Akawo, your personal finance assistant. You can tell me about your sales and debts, or ask me to list your debtors and total income or debt.',
+      yo: 'Èmi ni akawọ́, olùrànlọ́wọ́ yín fún ìṣirò owó. Ẹ lè sọ fún mi nípa ọjà tẹ́ ẹ tà àti gbèsè, tàbí kí ẹ béèrè àwọn tó jẹ yín lówó àti gbogbo owó tó wọlé.',
+      ig: 'Abụ m akawọ́, onye enyemaka ego gị. Ị nwere ike ịgwa m gbasara ahịa na ụgwọ gị, ma ọ bụ jụọ m maka ndị ji gị ụgwọ na ego ole i nwetara.',
+      ha: 'Ni ne akawọ́, mataimakin ku na kuɗi. Kuna iya gaya mani game da tallace-tallace da basussuka, ko ku tambaye ni jerin sunayen masu bin ku bashi da jimlar kuɗin da aka samu.',
+      en: 'I am akawọ́, your personal finance assistant. You can tell me about your sales and debts, or ask me to list your debtors and total income or debt.',
     };
     return messages[lang];
   }

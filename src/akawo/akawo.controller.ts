@@ -9,6 +9,9 @@ import {
   Get,
   Logger,
   BadRequestException,
+  Delete,
+  Param,
+  Query,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -24,8 +27,6 @@ export class AkawoController {
   @Post('process-audio')
   @UseInterceptors(FileInterceptor('audio'))
   async processAudio(
-    // The @UploadedFile decorator now reliably provides a file object
-    // with a 'path' property pointing to the fully saved file on disk.
     @UploadedFile() file: Express.Multer.File,
     @Request() req: { user: { sub: string } },
     @Body() body: { language: 'ig' | 'yo' | 'ha' | 'en' },
@@ -39,12 +40,31 @@ export class AkawoController {
     );
 
     const userId = req.user.sub;
-    // We now pass the stable file path to the service.
     return this.akawoService.processAudioCommand(
       file.path,
       userId,
       body.language,
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('transactions/:id')
+  async deleteSingleTransaction(
+    @Param('id') id: string,
+    @Request() req: { user: { sub: string } },
+  ) {
+    const userId = req.user.sub;
+    return this.akawoService.deleteSingleTransaction(id, userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('transactions')
+  async deleteTransactionsByDate(
+    @Query('date') date: string,
+    @Request() req: { user: { sub: string } },
+  ) {
+    const userId = req.user.sub;
+    return this.akawoService.deleteTransactionsByDate(date, userId);
   }
 
   @UseGuards(JwtAuthGuard)

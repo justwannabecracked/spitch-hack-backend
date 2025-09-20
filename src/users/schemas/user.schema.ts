@@ -11,6 +11,9 @@ export class User extends Document {
 
   @Prop({ required: true })
   password_hash: string;
+
+  @Prop({ type: String, required: false })
+  image: string;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
