@@ -55,7 +55,12 @@ export class AuthService {
       image,
     );
 
-    const payload = { sub: user._id, username: user.username };
+    const payload = {
+      sub: user._id,
+      username: user.username,
+      email: user.email,
+      image: user.image,
+    };
     return {
       accessToken: this.jwtService.sign(payload),
       user,
