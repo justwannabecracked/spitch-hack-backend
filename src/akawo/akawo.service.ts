@@ -587,7 +587,7 @@ Follow these steps to ensure accuracy:
         income: 'a payment of',
         and: 'and',
         for: 'for',
-        preamble: "Got it. I've logged:",
+        preamble: "Alright. I've logged:",
       },
     };
 
